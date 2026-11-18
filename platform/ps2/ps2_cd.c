@@ -8,6 +8,10 @@
 #include <libcdvd.h>
 
 static int s_ps2CdInitDone = 0;
+
+// Vive en ps2_audio_out.c (build unity): rellena el audio mientras el lector
+// trabaja, para que una carga larga no deje sin datos a audsrv.
+void Ps2AudioOut_PumpIdle(void);
 static unsigned char s_ps2CdDirBuf[2048] __attribute__((aligned(64)));
 
 int Ps2Cd_ReadSectors(unsigned int lsn, unsigned int count, void *buf);
@@ -135,7 +139,11 @@ int Ps2Cd_ReadSectors(unsigned int lsn, unsigned int count, void *buf)
 	{
 		if (sceCdRead(lsn, count, buf, &mode) != 0)
 		{
-			sceCdSync(0);
+			// Espera no bloqueante: mientras lee, seguimos alimentando el audio.
+			while (sceCdSync(1) != 0)
+			{
+				Ps2AudioOut_PumpIdle();
+			}
 			if (sceCdGetError() == SCECdErNO)
 			{
 				return 1;
