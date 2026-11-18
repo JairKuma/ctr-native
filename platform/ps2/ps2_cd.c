@@ -129,7 +129,7 @@ int Ps2Cd_SearchFile(const char *name, unsigned int *lsnOut, unsigned int *sizeO
 
 // Reads 'count' 2048-byte sectors starting at 'lsn' into buf (64-byte aligned).
 // Diagnostico: se registran las primeras lecturas y un resumen periodico.
-#define PS2_CD_LOG_FIRST_READS 120
+#define PS2_CD_LOG_FIRST_READS 40
 static unsigned int s_ps2CdReadCount = 0;
 static unsigned int s_ps2CdStatReads = 0;
 static unsigned int s_ps2CdStatSectors = 0;
