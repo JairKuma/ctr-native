@@ -82,6 +82,12 @@ internal void Ps2_RemoveVBlankHandler(void)
 	s_vblankHandlerId = -1;
 }
 
+// Si el juego va con retraso y se le entregan varios VBlanks de golpe, solo los
+// primeros generan audio. Si no, cuando el audio es costoso cada fotograma
+// genera aun mas audio y el juego se va frenando cada vez mas.
+#define PS2_AUDIO_MAX_CATCHUP_PUMPS 2
+global_variable int s_audioPumpsThisBurst = 0;
+
 internal void Ps2_EmitVBlank(void)
 {
 	NativeRCnt_EmitVBlank();
@@ -93,7 +99,11 @@ internal void Ps2_EmitVBlank(void)
 
 	NativeAudio_StepVBlank();
 	// Rellena la cola de audsrv con lo que haya generado la SPU emulada.
-	Ps2AudioOut_Pump();
+	if (s_audioPumpsThisBurst < PS2_AUDIO_MAX_CATCHUP_PUMPS)
+	{
+		s_audioPumpsThisBurst++;
+		Ps2AudioOut_Pump();
+	}
 	s_nativeVBlankCount++;
 }
 
@@ -102,6 +112,8 @@ internal void Ps2_EmitVBlank(void)
 internal int Ps2_CatchUpDueVBlanks(void)
 {
 	int emitted = 0;
+
+	s_audioPumpsThisBurst = 0;
 	u32 pending = s_hwVBlankCount - s_consumedVBlankCount;
 
 	if (pending > PS2_VSYNC_CATCHUP_MAX)
@@ -128,6 +140,8 @@ internal void Ps2_WaitAndEmitVBlank(void)
 	}
 
 	s_consumedVBlankCount++;
+	// VBlank esperado (ritmo normal): siempre genera su audio.
+	s_audioPumpsThisBurst = 0;
 	Ps2_EmitVBlank();
 }
 
