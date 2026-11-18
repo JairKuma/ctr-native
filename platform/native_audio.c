@@ -253,6 +253,14 @@ struct NativeAudioXaPreparedStream
 	int frameCount;
 	int sampleRate;
 	int numChannels;
+#if defined(CTR_PS2)
+	// PS2: XA "perezosa" (ver NativeAudio_PrepareXAStream).
+	int lazy;
+	struct NativeDiscImageFile discFile;
+	int scanSector;
+	int scanEnd;
+	int channelFilter;
+#endif
 };
 
 // Compressed XA sectors stay resident while their PCM is decoded through a
@@ -268,6 +276,15 @@ struct NativeAudioXaStream
 	int nextSector;
 	u64 decodedFrames;
 	struct NativeAudioXaDecodeState adpcm;
+#if defined(CTR_PS2)
+	// PS2: si lazy, 'sectors' es un buffer de 1 sector y los sectores se leen
+	// del disco a medida que se reproducen (como la PS1).
+	int lazy;
+	struct NativeDiscImageFile discFile;
+	int scanSector;
+	int scanEnd;
+	int channelFilter;
+#endif
 	s16 ring[NATIVE_AUDIO_XA_RING_FRAMES * NATIVE_AUDIO_CHANNELS];
 };
 
@@ -2057,6 +2074,73 @@ internal int NativeAudio_PrepareXAStream(struct NativeAudioXaSource *src, int ch
 
 	int sectorsToScan = maxSectors < src->totalSectors ? maxSectors : src->totalSectors;
 
+#if defined(CTR_PS2)
+	// NOTE: PS2 build. Leer TODA la pista antes de reproducirla bloquea el juego
+	// varios segundos con el lector real de la PS2 (y con PCSX2, que emula su
+	// velocidad). Como la PS1, se lee mientras suena: aqui solo se buscan los
+	// dos primeros sectores del canal (formato y separacion entre sectores) para
+	// estimar la duracion; NativeAudio_XaStreamDecodeNextSectorNoLock() lee el
+	// resto y corrige la duracion al llegar al final.
+	if (src->kind == NATIVE_AUDIO_XA_SOURCE_DISC)
+	{
+		int first = -1;
+		int second = -1;
+		const int probeEnd = sectorsToScan < 256 ? sectorsToScan : 256;
+
+		for (int sector = 0; sector < probeEnd; sector++)
+		{
+			if (!NativeAudio_XaSourceReadSector(src, sector, sectorBuf))
+			{
+				return 0;
+			}
+			if (!NativeAudio_IsXAAudioSector(sectorBuf, src->sectorBase, channelFilter))
+			{
+				continue;
+			}
+			if (first < 0)
+			{
+				const u8 *header = &sectorBuf[src->sectorBase];
+				first = sector;
+				sampleRate = (((header[3] >> 2) & 0x03) == 0) ? XA_SAMPLE_RATE_37800 : XA_SAMPLE_RATE_18900;
+				numChannels = ((header[3] & 0x03) != 0) ? 2 : 1;
+			}
+			else
+			{
+				second = sector;
+				break;
+			}
+		}
+
+		if (first < 0)
+		{
+			return 0;
+		}
+
+		const int stride = (second > first) ? (second - first) : 1;
+		// Estimacion por exceso (se corrige al terminar la pista).
+		const int estimatedSectors = ((sectorsToScan - first) + stride - 1) / stride + 1;
+		const int framesPerSectorLazy = (numChannels == 2) ? (XA_SECTOR_MAX_SAMPLES / 2) : XA_SECTOR_MAX_SAMPLES;
+
+		prepared->sectors = (u8 *)malloc((size_t)src->sectorSize);
+		if (prepared->sectors == NULL)
+		{
+			return 0;
+		}
+		prepared->sectorSize = src->sectorSize;
+		prepared->sectorBase = src->sectorBase;
+		prepared->sectorCount = estimatedSectors;
+		prepared->frameCount = estimatedSectors * framesPerSectorLazy;
+		prepared->sampleRate = sampleRate;
+		prepared->numChannels = numChannels;
+		prepared->lazy = 1;
+		prepared->discFile = src->discFile;
+		prepared->scanSector = first;
+		prepared->scanEnd = sectorsToScan;
+		prepared->channelFilter = channelFilter;
+		return 1;
+	}
+#endif
+
 	for (int sector = 0; sector < sectorsToScan; sector++)
 	{
 		u8 *newSectors;
@@ -2155,6 +2239,13 @@ internal void NativeAudio_XaStreamStartNoLock(struct NativeAudioXaPreparedStream
 	xs->sectorBase = prepared->sectorBase;
 	xs->sectorCount = prepared->sectorCount;
 	xs->numChannels = prepared->numChannels;
+#if defined(CTR_PS2)
+	xs->lazy = prepared->lazy;
+	xs->discFile = prepared->discFile;
+	xs->scanSector = prepared->scanSector;
+	xs->scanEnd = prepared->scanEnd;
+	xs->channelFilter = prepared->channelFilter;
+#endif
 	prepared->sectors = NULL;
 }
 
@@ -2167,12 +2258,49 @@ internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 	int frames;
 	int f;
 
+#if defined(CTR_PS2)
+	if ((xs->sectors != NULL) && xs->lazy)
+	{
+		// Buscar el siguiente sector de audio de este canal leyendo del disco
+		// (la cache de native_disc_image.c agrupa las lecturas).
+		int found = 0;
+		while (xs->scanSector < xs->scanEnd)
+		{
+			const int sector = xs->scanSector++;
+			if (!NativeDiscImage_ReadRawSectors(&xs->discFile, (u32)sector, 1, xs->sectors))
+			{
+				break;
+			}
+			if (NativeAudio_IsXAAudioSector(xs->sectors, xs->sectorBase, xs->channelFilter))
+			{
+				found = 1;
+				break;
+			}
+		}
+		if (!found)
+		{
+			// Fin real de la pista: ajustar la duracion estimada para que la
+			// pista termine ya (el juego puede estar esperando a que acabe).
+			xs->scanSector = xs->scanEnd;
+			if ((u64)s_audio.xa.frameCount > xs->decodedFrames)
+			{
+				s_audio.xa.frameCount = (int)xs->decodedFrames;
+			}
+			return 0;
+		}
+	}
+	else
+#endif
 	if ((xs->sectors == NULL) || (xs->nextSector >= xs->sectorCount))
 	{
 		return 0;
 	}
 
+#if defined(CTR_PS2)
+	const u8 *src = xs->lazy ? xs->sectors : &xs->sectors[(size_t)xs->nextSector * (size_t)xs->sectorSize];
+#else
 	const u8 *src = &xs->sectors[(size_t)xs->nextSector * (size_t)xs->sectorSize];
+#endif
 	xs->nextSector++;
 
 	memset(&tmp, 0, sizeof(tmp));

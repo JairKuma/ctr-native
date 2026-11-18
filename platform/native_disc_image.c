@@ -127,9 +127,20 @@ internal int NativeDiscImage_CheckRawSectorHeader(const u8 *sector)
 // time. Read a run of consecutive sectors at once and serve the following
 // requests from memory.
 #define NATIVE_DISC_IMAGE_CACHE_SECTORS 64u
-static u8 s_nativeDiscImageCache[NATIVE_DISC_IMAGE_CACHE_SECTORS * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE] __attribute__((aligned(64)));
+// Dos huecos de cache (el menos usado se reemplaza): asi la musica XA, que se
+// lee mientras suena, y la carga del nivel no se expulsan la una a la otra.
+#define NATIVE_DISC_IMAGE_CACHE_SLOTS 2
+static u8 s_nativeDiscImageCacheSlots[NATIVE_DISC_IMAGE_CACHE_SLOTS][NATIVE_DISC_IMAGE_CACHE_SECTORS * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE] __attribute__((aligned(64)));
+static u32 s_nativeDiscImageSlotStart[NATIVE_DISC_IMAGE_CACHE_SLOTS];
+static u32 s_nativeDiscImageSlotCount[NATIVE_DISC_IMAGE_CACHE_SLOTS];
+static u32 s_nativeDiscImageSlotUse[NATIVE_DISC_IMAGE_CACHE_SLOTS];
+static u32 s_nativeDiscImageUseClock = 0;
+// Hueco activo (lo usan las rutinas de lectura de abajo).
+static u8 *s_nativeDiscImageCache = s_nativeDiscImageCacheSlots[0];
 static u32 s_nativeDiscImageCacheStart = 0;
 static u32 s_nativeDiscImageCacheCount = 0;
+static int s_nativeDiscImageActiveSlot = 0;
+#define NATIVE_DISC_IMAGE_CACHE_BYTES (NATIVE_DISC_IMAGE_CACHE_SECTORS * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE)
 
 // NOTE: PS2 build. When the image is on the real disc (cdrom0:), read it by
 // DVD sector with sceCdRead instead of fopen/fseek/fread: no file layer, no
@@ -210,8 +221,51 @@ internal u32 NativeDiscImage_Ps2CdReadBytes(u32 offset, u8 *dst, u32 size)
 
 internal void NativeDiscImage_InvalidateCache(void)
 {
+	for (int i = 0; i < NATIVE_DISC_IMAGE_CACHE_SLOTS; i++)
+	{
+		s_nativeDiscImageSlotStart[i] = 0;
+		s_nativeDiscImageSlotCount[i] = 0;
+		s_nativeDiscImageSlotUse[i] = 0;
+	}
 	s_nativeDiscImageCacheStart = 0;
 	s_nativeDiscImageCacheCount = 0;
+}
+
+// Elige el hueco que contiene 'lba', o si ninguno, el menos usado (vacio).
+// Deja s_nativeDiscImageCache/Start/Count apuntando a ese hueco.
+internal void NativeDiscImage_SelectCacheSlot(u32 lba)
+{
+	// Guardar el estado del hueco activo.
+	s_nativeDiscImageSlotStart[s_nativeDiscImageActiveSlot] = s_nativeDiscImageCacheStart;
+	s_nativeDiscImageSlotCount[s_nativeDiscImageActiveSlot] = s_nativeDiscImageCacheCount;
+
+	int chosen = -1;
+	for (int i = 0; i < NATIVE_DISC_IMAGE_CACHE_SLOTS; i++)
+	{
+		if ((s_nativeDiscImageSlotCount[i] != 0) && (lba >= s_nativeDiscImageSlotStart[i]) && (lba < s_nativeDiscImageSlotStart[i] + s_nativeDiscImageSlotCount[i]))
+		{
+			chosen = i;
+			break;
+		}
+	}
+	if (chosen < 0)
+	{
+		chosen = 0;
+		for (int i = 1; i < NATIVE_DISC_IMAGE_CACHE_SLOTS; i++)
+		{
+			if (s_nativeDiscImageSlotUse[i] < s_nativeDiscImageSlotUse[chosen])
+			{
+				chosen = i;
+			}
+		}
+		s_nativeDiscImageSlotCount[chosen] = 0;
+	}
+
+	s_nativeDiscImageSlotUse[chosen] = ++s_nativeDiscImageUseClock;
+	s_nativeDiscImageActiveSlot = chosen;
+	s_nativeDiscImageCache = s_nativeDiscImageCacheSlots[chosen];
+	s_nativeDiscImageCacheStart = s_nativeDiscImageSlotStart[chosen];
+	s_nativeDiscImageCacheCount = s_nativeDiscImageSlotCount[chosen];
 }
 
 internal int NativeDiscImage_ReadRawSector(u32 lba, u8 *sector)
@@ -221,10 +275,12 @@ internal int NativeDiscImage_ReadRawSector(u32 lba, u8 *sector)
 		return 0;
 	}
 
+	NativeDiscImage_SelectCacheSlot(lba);
+
 	if (s_ps2CdDirect && ((s_nativeDiscImageCacheCount == 0) || (lba < s_nativeDiscImageCacheStart) || (lba >= s_nativeDiscImageCacheStart + s_nativeDiscImageCacheCount)))
 	{
 		const u64 offset = (u64)lba * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE;
-		const u32 bytesRead = (offset > 0xffffffffull) ? 0 : NativeDiscImage_Ps2CdReadBytes((u32)offset, s_nativeDiscImageCache, sizeof(s_nativeDiscImageCache));
+		const u32 bytesRead = (offset > 0xffffffffull) ? 0 : NativeDiscImage_Ps2CdReadBytes((u32)offset, s_nativeDiscImageCache, NATIVE_DISC_IMAGE_CACHE_BYTES);
 		const u32 sectorsRead = bytesRead / NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE;
 		if (sectorsRead == 0)
 		{
@@ -245,7 +301,7 @@ internal int NativeDiscImage_ReadRawSector(u32 lba, u8 *sector)
 			return 0;
 		}
 
-		const size_t bytesRead = fread(s_nativeDiscImageCache, 1, sizeof(s_nativeDiscImageCache), s_nativeDiscImageFile);
+		const size_t bytesRead = fread(s_nativeDiscImageCache, 1, NATIVE_DISC_IMAGE_CACHE_BYTES, s_nativeDiscImageFile);
 		const u32 sectorsRead = (u32)(bytesRead / NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE);
 		if (sectorsRead == 0)
 		{
