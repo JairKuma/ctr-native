@@ -131,6 +131,105 @@ static u8 s_nativeDiscImageCache[NATIVE_DISC_IMAGE_CACHE_SECTORS * NATIVE_DISC_I
 static u32 s_nativeDiscImageCacheStart = 0;
 static u32 s_nativeDiscImageCacheCount = 0;
 
+// NOTE: PS2 build. When the image is on the real disc (cdrom0:), read it by
+// DVD sector with sceCdRead instead of fopen/fseek/fread: no file layer, no
+// unsupported-op ("callnulldev") calls, and it is what OPL emulates best.
+#include <libcdvd.h>
+#define NATIVE_PS2_CD_SECTOR 2048u
+#define NATIVE_PS2_CD_BUF_SECTORS (((NATIVE_DISC_IMAGE_CACHE_SECTORS * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE) / NATIVE_PS2_CD_SECTOR) + 2u)
+static u8 s_ps2CdBuf[NATIVE_PS2_CD_BUF_SECTORS * NATIVE_PS2_CD_SECTOR] __attribute__((aligned(64)));
+static int s_ps2CdDirect = 0;
+static u32 s_ps2CdLsn = 0;
+static u32 s_ps2CdSize = 0;
+static int s_ps2CdInitDone = 0;
+
+internal int NativeDiscImage_Ps2CdOpen(const char *path)
+{
+	char name[NATIVE_DISC_IMAGE_PATH_MAX];
+	sceCdlFILE file;
+
+	s_ps2CdDirect = 0;
+	if ((path == NULL) || (strncmp(path, "cdrom0:", 7) != 0))
+	{
+		return 0;
+	}
+
+	const char *rest = path + 7;
+	snprintf(name, sizeof(name), "%s%s%s", (rest[0] == '\\') ? "" : "\\", rest, (strchr(rest, ';') != NULL) ? "" : ";1");
+	for (char *c = name; *c; c++)
+	{
+		if (*c == '/')
+		{
+			*c = '\\';
+		}
+	}
+
+	if (!s_ps2CdInitDone)
+	{
+		sceCdInit(SCECdINIT);
+		s_ps2CdInitDone = 1;
+	}
+	sceCdDiskReady(0);
+
+	memset(&file, 0, sizeof(file));
+	if (sceCdSearchFile(&file, name) != 1)
+	{
+		printf("[CTR PS2] sceCdSearchFile failed for %s, using file I/O\n", name);
+		return 0;
+	}
+
+	s_ps2CdLsn = file.lsn;
+	s_ps2CdSize = file.size;
+	s_ps2CdDirect = 1;
+	printf("[CTR PS2] Direct disc reads: %s lsn %u size %u\n", name, (unsigned)s_ps2CdLsn, (unsigned)s_ps2CdSize);
+	return 1;
+}
+
+// Reads 'size' bytes at byte 'offset' of the image into dst. Returns bytes read.
+internal u32 NativeDiscImage_Ps2CdReadBytes(u32 offset, u8 *dst, u32 size)
+{
+	if (offset >= s_ps2CdSize)
+	{
+		return 0;
+	}
+	if (size > s_ps2CdSize - offset)
+	{
+		size = s_ps2CdSize - offset;
+	}
+
+	const u32 firstSector = offset / NATIVE_PS2_CD_SECTOR;
+	const u32 skip = offset % NATIVE_PS2_CD_SECTOR;
+	u32 count = (skip + size + NATIVE_PS2_CD_SECTOR - 1) / NATIVE_PS2_CD_SECTOR;
+	if (count > NATIVE_PS2_CD_BUF_SECTORS)
+	{
+		count = NATIVE_PS2_CD_BUF_SECTORS;
+		size = count * NATIVE_PS2_CD_SECTOR - skip;
+	}
+
+	sceCdRMode mode;
+	mode.trycount = 5;
+	mode.spindlctrl = SCECdSpinNom;
+	mode.datapattern = SCECdSecS2048;
+	mode.pad = 0;
+
+	for (int attempt = 0; attempt < 3; attempt++)
+	{
+		if (sceCdRead(s_ps2CdLsn + firstSector, count, s_ps2CdBuf, &mode) != 0)
+		{
+			sceCdSync(0);
+			if (sceCdGetError() == SCECdErNO)
+			{
+				memcpy(dst, s_ps2CdBuf + skip, size);
+				return size;
+			}
+		}
+		sceCdSync(0);
+	}
+
+	printf("[CTR PS2] sceCdRead failed at lsn %u (err %d)\n", (unsigned)(s_ps2CdLsn + firstSector), sceCdGetError());
+	return 0;
+}
+
 internal void NativeDiscImage_InvalidateCache(void)
 {
 	s_nativeDiscImageCacheStart = 0;
@@ -139,9 +238,24 @@ internal void NativeDiscImage_InvalidateCache(void)
 
 internal int NativeDiscImage_ReadRawSector(u32 lba, u8 *sector)
 {
-	if (s_nativeDiscImageFile == NULL)
+	if ((s_nativeDiscImageFile == NULL) && !s_ps2CdDirect)
 	{
 		return 0;
+	}
+
+	if (s_ps2CdDirect && ((s_nativeDiscImageCacheCount == 0) || (lba < s_nativeDiscImageCacheStart) || (lba >= s_nativeDiscImageCacheStart + s_nativeDiscImageCacheCount)))
+	{
+		const u64 offset = (u64)lba * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE;
+		const u32 bytesRead = (offset > 0xffffffffull) ? 0 : NativeDiscImage_Ps2CdReadBytes((u32)offset, s_nativeDiscImageCache, sizeof(s_nativeDiscImageCache));
+		const u32 sectorsRead = bytesRead / NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE;
+		if (sectorsRead == 0)
+		{
+			NativeDiscImage_InvalidateCache();
+			return 0;
+		}
+
+		s_nativeDiscImageCacheStart = lba;
+		s_nativeDiscImageCacheCount = sectorsRead;
 	}
 
 	if ((s_nativeDiscImageCacheCount == 0) || (lba < s_nativeDiscImageCacheStart) || (lba >= s_nativeDiscImageCacheStart + s_nativeDiscImageCacheCount))
@@ -443,6 +557,20 @@ int NativeDiscImage_Init(const char *assetsDir)
 	}
 
 	NativeDiscImage_InvalidateCache();
+#if defined(CTR_PS2)
+	if (NativeDiscImage_Ps2CdOpen(path))
+	{
+		if (!NativeDiscImage_LoadRoot())
+		{
+			s_ps2CdDirect = 0;
+			NativeDiscImage_InvalidateCache();
+		}
+		else
+		{
+			goto image_open;
+		}
+	}
+#endif
 	s_nativeDiscImageFile = fopen(path, "rb");
 	if (s_nativeDiscImageFile == NULL)
 	{
@@ -455,10 +583,14 @@ int NativeDiscImage_Init(const char *assetsDir)
 		s_nativeDiscImageFile = NULL;
 		return 0;
 	}
+#if defined(CTR_PS2)
+image_open:
+#endif
 
 	if (!NativePath_NormalizeSlashes(s_nativeDiscImagePath, sizeof(s_nativeDiscImagePath), NativeStr8_FromCString(path)))
 	{
-		fclose(s_nativeDiscImageFile);
+		if (s_nativeDiscImageFile != NULL)
+			fclose(s_nativeDiscImageFile);
 		s_nativeDiscImageFile = NULL;
 		return 0;
 	}
