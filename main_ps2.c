@@ -160,6 +160,30 @@ static int Ps2Main_DirFromArgv0(const char *argv0, char *dst, size_t dstSize)
 	return 1;
 }
 
+// Disco de PS2 (ISO cargada por OPL, o disco grabado): los nombres del disco
+// son cortos y en mayusculas, asi que la imagen se llama CTR_U.BIN.
+static int Ps2Main_FindDiscImage(void)
+{
+	static const char *const candidates[] = {
+	    "cdrom0:\\CTR_U.BIN",
+	    "cdrom0:\\ASSETS\\CTR_U.BIN",
+	};
+
+	for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++)
+	{
+		FILE *file = fopen(candidates[i], "rb");
+		if (file != NULL)
+		{
+			fclose(file);
+			g_ps2DiscImagePathOverride = candidates[i];
+			printf("[CTR PS2] Disc image: %s\n", candidates[i]);
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 static const char *Ps2Main_FindBaseDir(int argc, char *argv[])
 {
 	static char argvDir[PS2_PATH_MAX];
@@ -167,7 +191,6 @@ static const char *Ps2Main_FindBaseDir(int argc, char *argv[])
 	    "host:",         // PCSX2 con "Host Filesystem" activado / PS2Link
 	    "mass:/CTR",     // pendrive USB
 	    "mass:",         //
-	    "cdrom0:",       // disco grabado
 	};
 
 	if ((argc > 0) && Ps2Main_DirFromArgv0(argv[0], argvDir, sizeof(argvDir)))
@@ -177,6 +200,12 @@ static const char *Ps2Main_FindBaseDir(int argc, char *argv[])
 		{
 			return argvDir;
 		}
+	}
+
+	printf("[CTR PS2] Looking for CTR_U.BIN on the disc (cdrom0:)\n");
+	if (Ps2Main_FindDiscImage())
+	{
+		return "cdrom0:";
 	}
 
 	for (size_t i = 0; i < sizeof(fallbacks) / sizeof(fallbacks[0]); i++)
@@ -202,8 +231,9 @@ int main(int argc, char *argv[])
 	const char *baseDir = Ps2Main_FindBaseDir(argc, argv);
 	if (baseDir == NULL)
 	{
-		printf("[CTR PS2] ERROR: assets/ctr-u.bin not found.\n");
-		printf("[CTR PS2] Put the ELF next to an 'assets' folder that contains ctr-u.bin.\n");
+		printf("[CTR PS2] ERROR: assets/ctr-u.bin (or CTR_U.BIN on the disc) not found.\n");
+		printf("[CTR PS2] Put the ELF next to an 'assets' folder that contains ctr-u.bin,\n");
+		printf("[CTR PS2] or build a disc/ISO with CTR_U.BIN in its root.\n");
 		SleepThread();
 		return 1;
 	}
