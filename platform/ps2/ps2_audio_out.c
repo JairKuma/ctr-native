@@ -346,6 +346,20 @@ global_variable int s_ps2AudioGenStarted = 0;
 // Si se va mas atrasado que esto (parada muy larga), se salta lo antiguo.
 #define PS2_AUDIO_MAX_BEHIND_VBLANKS 24
 
+// --- Limite de CPU para el sonido ---------------------------------------------
+// Emular la SPU de PS1 es caro. Si generar el sonido llega a costar mas que el
+// tiempo real (consola real, escenas cargadas), el juego se quedaria generando
+// audio sin parar y no avanzaria nunca (parece colgado, p. ej. en la bandera).
+// Por eso el sonido tiene un "presupuesto": como mucho este % del tiempo real.
+// Si se lo gasta, se salta el audio que falte (se oye un corte) y el juego sigue.
+#define PS2_AUDIO_CPU_BUDGET_PERCENT 70u
+// Credito maximo acumulado (en VBlanks de CPU): permite rafagas cortas.
+#define PS2_AUDIO_CPU_BUDGET_MAX_VBLANKS 8u
+global_variable long long s_ps2AudioBudgetCredit = 0; // en ciclos de la EE
+global_variable u32 s_ps2AudioBudgetLast = 0;
+global_variable int s_ps2AudioBudgetStarted = 0;
+global_variable u32 s_ps2AudioBudgetSkippedVBlanks = 0; // para el informe
+
 // Genera el audio de los VBlanks de hardware que han pasado y lo entrega.
 // El audio avanza con el reloj real, como la SPU y el lector de una PS1, aunque
 // el juego este cargando o vaya lento.
@@ -374,8 +388,39 @@ internal void Ps2AudioOut_Service(void)
 	const u32 profStart = Ps2Prof_Now();
 	const unsigned long long profCdStart = g_ps2ProfCdCycles;
 	s_ps2AudioInPump = 1;
+
+	// Presupuesto: se gana PS2_AUDIO_CPU_BUDGET_PERCENT % del tiempo pasado.
+	{
+		const u32 nowBudget = Ps2Prof_Now();
+		if (!s_ps2AudioBudgetStarted)
+		{
+			s_ps2AudioBudgetStarted = 1;
+			s_ps2AudioBudgetCredit = (long long)(PS2_EE_CYCLES_PER_VBLANK * PS2_AUDIO_CPU_BUDGET_MAX_VBLANKS);
+		}
+		else
+		{
+			const u32 passed = nowBudget - s_ps2AudioBudgetLast;
+			s_ps2AudioBudgetCredit += (long long)(((unsigned long long)passed * PS2_AUDIO_CPU_BUDGET_PERCENT) / 100ull);
+			const long long creditMax = (long long)(PS2_EE_CYCLES_PER_VBLANK * PS2_AUDIO_CPU_BUDGET_MAX_VBLANKS);
+			if (s_ps2AudioBudgetCredit > creditMax)
+			{
+				s_ps2AudioBudgetCredit = creditMax;
+			}
+		}
+		s_ps2AudioBudgetLast = nowBudget;
+	}
+
 	while (s_ps2AudioGenVBlank != hw)
 	{
+		if (s_ps2AudioBudgetCredit <= 0)
+		{
+			// Sin presupuesto: se salta el audio que falta hasta "ahora".
+			s_ps2AudioBudgetSkippedVBlanks += hw - s_ps2AudioGenVBlank;
+			s_ps2AudioGenVBlank = hw;
+			break;
+		}
+		const u32 vblankStart = Ps2Prof_Now();
+		const unsigned long long vblankCdStart = g_ps2ProfCdCycles;
 		s_ps2AudioGenVBlank++;
 		s_ps2AudioRateAcc += PS2_AUDIO_RATE_NUM;
 		const int frames = (int)(s_ps2AudioRateAcc / PS2_AUDIO_RATE_DEN);
@@ -385,6 +430,10 @@ internal void Ps2AudioOut_Service(void)
 			const int bytes = frames * PS2_AUDIO_FRAME_BYTES;
 			stream->callback(stream->userdata, stream, bytes, bytes);
 		}
+		// Coste de este VBlank de audio (sin la espera al disco).
+		const unsigned long long vblankCost = (unsigned long long)(u32)(Ps2Prof_Now() - vblankStart);
+		const unsigned long long vblankCd = g_ps2ProfCdCycles - vblankCdStart;
+		s_ps2AudioBudgetCredit -= (long long)((vblankCost > vblankCd) ? (vblankCost - vblankCd) : 0ull);
 	}
 	s_ps2AudioInPump = 0;
 	s_ps2AudioLastServiceVBlank = hw;
@@ -459,6 +508,21 @@ internal void Ps2AudioOut_Report(void)
 	s_ps2AudioTrimmedFrames = 0;
 
 	const unsigned long long total = (unsigned long long)elapsed * PS2_EE_CYCLES_PER_VBLANK;
+
+	// Desglose del sonido (native_audio.c) y audio saltado por el limite.
+	{
+		const unsigned long long mixFrames = (g_ps2ProfMixFrames > 0) ? g_ps2ProfMixFrames : 1ull;
+		const unsigned long long voicesX10 = (g_ps2ProfVoiceSamples * 10ull) / mixFrames;
+		printf("[CTR PS2] audio cpu: voces %u%% | xa %u%% | eco %u%% | voces sonando %u.%u | saltado %u vblanks\n",
+		       Ps2Prof_Percent(g_ps2ProfVoiceCycles, total), Ps2Prof_Percent(g_ps2ProfXaCycles, total), Ps2Prof_Percent(g_ps2ProfReverbCycles, total),
+		       (unsigned)(voicesX10 / 10ull), (unsigned)(voicesX10 % 10ull), (unsigned)s_ps2AudioBudgetSkippedVBlanks);
+		g_ps2ProfVoiceCycles = 0;
+		g_ps2ProfXaCycles = 0;
+		g_ps2ProfReverbCycles = 0;
+		g_ps2ProfVoiceSamples = 0;
+		g_ps2ProfMixFrames = 0;
+		s_ps2AudioBudgetSkippedVBlanks = 0;
+	}
 	const unsigned long long known = g_ps2ProfAudioCycles + g_ps2ProfCdCycles + g_ps2ProfIdleCycles + g_ps2ProfGsCycles;
 	const unsigned long long rest = (known < total) ? (total - known) : 0ull;
 	printf("[CTR PS2] cpu: audio %u%% | cd %u%% | gs %u%% | libre %u%% | juego %u%%\n", Ps2Prof_Percent(g_ps2ProfAudioCycles, total),
