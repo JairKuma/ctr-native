@@ -44,6 +44,11 @@ global_variable int s_pinnedVramDisplayH = 0;
 
 // Contador incrementado por la interrupcion de VBlank del hardware.
 global_variable volatile u32 s_hwVBlankCount = 0;
+
+internal u32 Ps2_GetHwVBlankCount(void)
+{
+	return s_hwVBlankCount;
+}
 // Cuantos de esos VBlanks hardware ya se han entregado al juego.
 global_variable u32 s_consumedVBlankCount = 0;
 // VBlanks que ha visto el juego (lo que devuelve VSync(-1)).
