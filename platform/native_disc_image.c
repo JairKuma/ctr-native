@@ -155,6 +155,9 @@ int Ps2Cd_ReadSectors(unsigned int lsn, unsigned int count, void *buf);
 #define NATIVE_PS2_CD_BUF_SECTORS (((NATIVE_DISC_IMAGE_CACHE_SECTORS * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE) / NATIVE_PS2_CD_SECTOR) + 2u)
 static u8 s_ps2CdBuf[NATIVE_PS2_CD_BUF_SECTORS * NATIVE_PS2_CD_SECTOR] __attribute__((aligned(64)));
 static int s_ps2CdDirect = 0;
+// 1 mientras se esta leyendo del disco (el audio se genera durante la espera y
+// no debe empezar otra lectura a medias, ver native_audio.c).
+int g_ps2DiscReadBusy = 0;
 static u32 s_ps2CdLsn = 0;
 static u32 s_ps2CdSize = 0;
 
@@ -213,7 +216,10 @@ internal u32 NativeDiscImage_Ps2CdReadBytes(u32 offset, u8 *dst, u32 size)
 		size = count * NATIVE_PS2_CD_SECTOR - skip;
 	}
 
-	if (Ps2Cd_ReadSectors(s_ps2CdLsn + firstSector, count, s_ps2CdBuf))
+	g_ps2DiscReadBusy = 1;
+	const int ok = Ps2Cd_ReadSectors(s_ps2CdLsn + firstSector, count, s_ps2CdBuf);
+	g_ps2DiscReadBusy = 0;
+	if (ok)
 	{
 		memcpy(dst, s_ps2CdBuf + skip, size);
 		return size;
@@ -232,6 +238,24 @@ internal void NativeDiscImage_InvalidateCache(void)
 	}
 	s_nativeDiscImageCacheStart = 0;
 	s_nativeDiscImageCacheCount = 0;
+}
+
+// 1 si el sector ya esta en alguna cache (se puede leer sin tocar el lector).
+int NativeDiscImage_Ps2IsCached(u32 lba)
+{
+	if ((s_nativeDiscImageCacheCount != 0) && (lba >= s_nativeDiscImageCacheStart) && (lba < s_nativeDiscImageCacheStart + s_nativeDiscImageCacheCount))
+	{
+		return 1;
+	}
+	for (int i = 0; i < NATIVE_DISC_IMAGE_CACHE_SLOTS; i++)
+	{
+		if ((i != s_nativeDiscImageActiveSlot) && (s_nativeDiscImageSlotCount[i] != 0) && (lba >= s_nativeDiscImageSlotStart[i]) &&
+		    (lba < s_nativeDiscImageSlotStart[i] + s_nativeDiscImageSlotCount[i]))
+		{
+			return 1;
+		}
+	}
+	return 0;
 }
 
 // Elige el hueco que contiene 'lba', o si ninguno, el menos usado (vacio).

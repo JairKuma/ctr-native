@@ -2266,6 +2266,13 @@ internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 		int found = 0;
 		while (xs->scanSector < xs->scanEnd)
 		{
+			// Si el lector esta ocupado (el audio se esta generando durante otra
+			// lectura) y el sector no esta en cache, esperar: silencio por ahora,
+			// sin dar la pista por terminada.
+			if (g_ps2DiscReadBusy && !NativeDiscImage_Ps2IsCached(xs->discFile.lba + (u32)xs->scanSector))
+			{
+				return 0;
+			}
 			const int sector = xs->scanSector++;
 			if (!NativeDiscImage_ReadRawSectors(&xs->discFile, (u32)sector, 1, xs->sectors))
 			{
