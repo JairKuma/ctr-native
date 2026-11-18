@@ -331,18 +331,23 @@ internal void Ps2Diag_PrintVisibility(void)
 		leafSrc = gGT->visMem1->visLeafSrc[0];
 	}
 
-	printf("[CTR PS2] vis: level %d mode1 %08x render %08x | cam mode %d hit %d quad %p camLeafSrc %p | drv under %p | visLeafSrc %p visible leaves %d/%d drawn %d | "
-	       "pos %d,%d,%d dist %d\n",
-	       gGT->levelID, (unsigned)gGT->gameMode1, (unsigned)gGT->renderFlags, cam->cameraMode, (int)cam->quadBlockSearchHit, (void *)cam->ptrQuadBlock,
-	       (void *)cam->visLeafSrc, (driver != NULL) ? (void *)driver->underDriver : NULL, (void *)leafSrc, leafBits, leafTotal, gGT->bspLeafsDrawn,
-	       pb->pos.x, pb->pos.y, pb->pos.z, pb->distanceToScreen_PREV);
+	const int spawnCount = ((gGT->level1 != NULL) && (gGT->level1->ptrSpawnType1 != NULL)) ? gGT->level1->ptrSpawnType1->count : -1;
+
+	printf("[CTR PS2] vis: f %d level %d mode1 %08x render %08x | cam mode %d hit %d quad %p camLeafSrc %p | drv under %p | visLeafSrc %p visible leaves %d/%d drawn %d | "
+	       "pos %d,%d,%d dist %d | trans frame %d/%d blend %d flags %08x st1 %d\n",
+	       gGT->frameTimer_MainFrame_ResetDB, gGT->levelID, (unsigned)gGT->gameMode1, (unsigned)gGT->renderFlags, cam->cameraMode, (int)cam->quadBlockSearchHit,
+	       (void *)cam->ptrQuadBlock, (void *)cam->visLeafSrc, (driver != NULL) ? (void *)driver->underDriver : NULL, (void *)leafSrc, leafBits, leafTotal,
+	       gGT->bspLeafsDrawn, pb->pos.x, pb->pos.y, pb->pos.z, pb->distanceToScreen_PREV, cam->transitionFrame, cam->transitionFrameCount, cam->transitionBlend,
+	       (unsigned)cam->flags, spawnCount);
 }
 
 void Platform_EndFrame(void)
 {
 	Platform_EndScene();
 
-	if (++s_visDiagFrame >= 60)
+	// Durante la intro de la carrera (START_OF_RACE) se muestrea mas a menudo.
+	const int startOfRace = (sdata->gGT != NULL) && ((sdata->gGT->gameMode1 & START_OF_RACE) != 0);
+	if (++s_visDiagFrame >= (startOfRace ? 10 : 60))
 	{
 		s_visDiagFrame = 0;
 		Ps2Diag_PrintVisibility();
