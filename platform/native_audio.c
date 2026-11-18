@@ -594,6 +594,18 @@ internal int NativeAudio_ApplyVolume(int sample, s16 volume, s16 masterVolume)
 {
 	int scaledVolume = NativeAudio_VolumeScale(volume);
 	int scaledMasterVolume = NativeAudio_VolumeScale(masterVolume);
+#if defined(CTR_PS2)
+	// NOTE: PS2 build. The R5900 has no 64-bit multiply/divide, so this runs
+	// with 32-bit math and gives exactly the same truncated result:
+	// |sample * volume| <= 2^30, and a*m/2^30 = ((a>>15)*m + ((a&0x7fff)*m >> 15)) >> 15.
+	if ((sample >= -0x8000) && (sample <= 0x8000))
+	{
+		int product = sample * scaledVolume;
+		u32 a = (u32)((product < 0) ? -product : product);
+		u32 q = (((a >> 15) * (u32)scaledMasterVolume) + (((a & 0x7fffu) * (u32)scaledMasterVolume) >> 15)) >> 15;
+		return (product < 0) ? -(int)q : (int)q;
+	}
+#endif
 	return (int)(((s64)sample * scaledVolume * scaledMasterVolume) / (NATIVE_AUDIO_DIRECT_VOL_MAX * NATIVE_AUDIO_DIRECT_VOL_MAX));
 }
 
@@ -601,6 +613,13 @@ internal int NativeAudio_ApplyMasterVolume(int sample, s16 masterVolume)
 {
 	int scaledMasterVolume = NativeAudio_VolumeScale(masterVolume);
 
+#if defined(CTR_PS2)
+	// |sample| <= 0xffff and volume <= 0x8000: the product fits in 32 bits.
+	if ((sample >= -0xffff) && (sample <= 0xffff))
+	{
+		return (sample * scaledMasterVolume) / NATIVE_AUDIO_DIRECT_VOL_MAX;
+	}
+#endif
 	return (int)(((s64)sample * scaledMasterVolume) / NATIVE_AUDIO_DIRECT_VOL_MAX);
 }
 
@@ -639,6 +658,22 @@ internal int NativeAudio_ReverbWrapIndex(int index, int sizeSamples)
 		return 0;
 	}
 
+#if defined(CTR_PS2)
+	// NOTE: PS2 build. Same result without a divide in the usual case
+	// (cursor + offset is at most a couple of buffer sizes away).
+	if ((index >= 0) && (index < sizeSamples))
+	{
+		return index;
+	}
+	if ((index >= sizeSamples) && (index < 2 * sizeSamples))
+	{
+		return index - sizeSamples;
+	}
+	if ((index < 0) && (index >= -sizeSamples))
+	{
+		return index + sizeSamples;
+	}
+#endif
 	index %= sizeSamples;
 	if (index < 0)
 	{
@@ -684,11 +719,45 @@ internal void NativeAudio_ReverbWrite(const struct NativeAudioReverbPreset *pres
 
 internal int NativeAudio_ReverbMul(int sample, s16 volume)
 {
+#if defined(CTR_PS2)
+	// |sample| <= 0xffff and |volume| <= 0x8000: the product fits in 32 bits.
+	if ((sample >= -0xffff) && (sample <= 0xffff))
+	{
+		return (sample * (int)volume) / 0x8000;
+	}
+#endif
 	return (int)(((s64)sample * (int)volume) / 0x8000);
 }
 
+#if defined(CTR_PS2)
+// NOTE: PS2 build. How many (0,0) samples in a row went into each FIR
+// history. With 39 or more the whole history is zero and so is the FIR, so
+// it can be skipped (the reverb is silent most of the time).
+global_variable int s_ps2ReverbInputZeroRun = 0;
+global_variable int s_ps2ReverbOutputZeroRun = 0;
+#endif
+
 internal int NativeAudio_ReverbFirApply(const s16 *history, s32 cursor)
 {
+#if defined(CTR_PS2)
+	// NOTE: PS2 build. Same result as the loop below, without a modulo per
+	// tap and with a 32-bit sum (sum of |coeffs| = 47526, * 32768 < 2^31).
+	if ((cursor >= 0) && (cursor < NATIVE_AUDIO_REVERB_FIR_TAPS))
+	{
+		int sum32 = 0;
+		int tap = 0;
+
+		for (int index = cursor; index < NATIVE_AUDIO_REVERB_FIR_TAPS; index++, tap++)
+		{
+			sum32 += (int)s_reverbFirCoeffs[tap] * (int)history[index];
+		}
+		for (int index = 0; index < cursor; index++, tap++)
+		{
+			sum32 += (int)s_reverbFirCoeffs[tap] * (int)history[index];
+		}
+		return NativeAudio_Clamp16(sum32 / 0x8000);
+	}
+#endif
 	s64 sum = 0;
 
 	for (int i = 0; i < NATIVE_AUDIO_REVERB_FIR_TAPS; i++)
@@ -711,6 +780,19 @@ internal void NativeAudio_ReverbPushInputSampleNoLock(int left, int right)
 	s_audio.reverb.inputHistoryLeft[s_audio.reverb.inputHistoryCursor] = (s16)NativeAudio_Clamp16(left);
 	s_audio.reverb.inputHistoryRight[s_audio.reverb.inputHistoryCursor] = (s16)NativeAudio_Clamp16(right);
 	s_audio.reverb.inputHistoryCursor = (s_audio.reverb.inputHistoryCursor + 1) % NATIVE_AUDIO_REVERB_FIR_TAPS;
+#if defined(CTR_PS2)
+	if ((NativeAudio_Clamp16(left) == 0) && (NativeAudio_Clamp16(right) == 0))
+	{
+		if (s_ps2ReverbInputZeroRun < NATIVE_AUDIO_REVERB_FIR_TAPS)
+		{
+			s_ps2ReverbInputZeroRun++;
+		}
+	}
+	else
+	{
+		s_ps2ReverbInputZeroRun = 0;
+	}
+#endif
 }
 
 internal void NativeAudio_ReverbPushOutputSampleNoLock(int left, int right)
@@ -718,6 +800,19 @@ internal void NativeAudio_ReverbPushOutputSampleNoLock(int left, int right)
 	s_audio.reverb.outputHistoryLeft[s_audio.reverb.outputHistoryCursor] = (s16)NativeAudio_Clamp16(left);
 	s_audio.reverb.outputHistoryRight[s_audio.reverb.outputHistoryCursor] = (s16)NativeAudio_Clamp16(right);
 	s_audio.reverb.outputHistoryCursor = (s_audio.reverb.outputHistoryCursor + 1) % NATIVE_AUDIO_REVERB_FIR_TAPS;
+#if defined(CTR_PS2)
+	if ((NativeAudio_Clamp16(left) == 0) && (NativeAudio_Clamp16(right) == 0))
+	{
+		if (s_ps2ReverbOutputZeroRun < NATIVE_AUDIO_REVERB_FIR_TAPS)
+		{
+			s_ps2ReverbOutputZeroRun++;
+		}
+	}
+	else
+	{
+		s_ps2ReverbOutputZeroRun = 0;
+	}
+#endif
 }
 
 internal void NativeAudio_ReverbClearBufferNoLock(void)
@@ -733,6 +828,10 @@ internal void NativeAudio_ReverbClearBufferNoLock(void)
 	s_audio.reverb.samplePhase = 0;
 	s_audio.reverb.lastOutLeft = 0;
 	s_audio.reverb.lastOutRight = 0;
+#if defined(CTR_PS2)
+	s_ps2ReverbInputZeroRun = NATIVE_AUDIO_REVERB_FIR_TAPS;
+	s_ps2ReverbOutputZeroRun = NATIVE_AUDIO_REVERB_FIR_TAPS;
+#endif
 }
 
 internal void NativeAudio_ReverbConfigureModeNoLock(int rawMode)
@@ -815,10 +914,20 @@ internal void NativeAudio_ReverbProcessNoLock(int sendLeft, int sendRight, int *
 	}
 
 	preset = NativeAudio_FindReverbPreset(s_audio.reverb.mode);
-	lin = NativeAudio_ReverbMul(NativeAudio_ReverbFirApply(s_audio.reverb.inputHistoryLeft, s_audio.reverb.inputHistoryCursor),
-	                            preset->reg[NATIVE_AUDIO_REV_VLIN]);
-	rin = NativeAudio_ReverbMul(NativeAudio_ReverbFirApply(s_audio.reverb.inputHistoryRight, s_audio.reverb.inputHistoryCursor),
-	                            preset->reg[NATIVE_AUDIO_REV_VRIN]);
+#if defined(CTR_PS2)
+	if (s_ps2ReverbInputZeroRun >= NATIVE_AUDIO_REVERB_FIR_TAPS)
+	{
+		lin = 0; // history all zero: FIR = 0
+		rin = 0;
+	}
+	else
+#endif
+	{
+		lin = NativeAudio_ReverbMul(NativeAudio_ReverbFirApply(s_audio.reverb.inputHistoryLeft, s_audio.reverb.inputHistoryCursor),
+		                            preset->reg[NATIVE_AUDIO_REV_VLIN]);
+		rin = NativeAudio_ReverbMul(NativeAudio_ReverbFirApply(s_audio.reverb.inputHistoryRight, s_audio.reverb.inputHistoryCursor),
+		                            preset->reg[NATIVE_AUDIO_REV_VRIN]);
+	}
 
 	sameLeft = NativeAudio_ReverbRunReflectionStage(preset, lin, NATIVE_AUDIO_REV_DLSAME, NATIVE_AUDIO_REV_MLSAME);
 	sameRight = NativeAudio_ReverbRunReflectionStage(preset, rin, NATIVE_AUDIO_REV_DRSAME, NATIVE_AUDIO_REV_MRSAME);
@@ -843,6 +952,16 @@ internal void NativeAudio_ReverbProcessNoLock(int sendLeft, int sendRight, int *
 	s_audio.reverb.cursor = NativeAudio_ReverbWrapIndex(s_audio.reverb.cursor + 1, s_audio.reverb.sizeSamples);
 
 output_fir:
+#if defined(CTR_PS2)
+	if (s_ps2ReverbOutputZeroRun >= NATIVE_AUDIO_REVERB_FIR_TAPS)
+	{
+		s_audio.reverb.lastOutLeft = 0; // history all zero: FIR = 0
+		s_audio.reverb.lastOutRight = 0;
+		*wetLeft = 0;
+		*wetRight = 0;
+		return;
+	}
+#endif
 	outLeft = NativeAudio_ReverbFirApplyUpsampled(s_audio.reverb.outputHistoryLeft, s_audio.reverb.outputHistoryCursor);
 	outRight = NativeAudio_ReverbFirApplyUpsampled(s_audio.reverb.outputHistoryRight, s_audio.reverb.outputHistoryCursor);
 	outLeft = NativeAudio_ReverbMul(outLeft, s_audio.reverbAttr.depth.left);
@@ -879,7 +998,30 @@ internal int NativeAudio_InterpolateVoiceSample(const struct NativeAudioVoice *v
 	return NativeAudio_Clamp16(sample);
 }
 
+#if defined(CTR_PS2)
+internal u64 NativeAudio_GetXAOutputFrameCountUncached(int frameCount, int sampleRate);
+
+// NOTE: PS2 build. This is called twice per output sample; the 64-bit divide
+// is a slow libgcc call on the R5900, so remember the last answer.
+global_variable int s_ps2XaCountCacheFrames = -1;
+global_variable int s_ps2XaCountCacheRate = -1;
+global_variable u64 s_ps2XaCountCacheValue = 0;
+
 internal u64 NativeAudio_GetXAOutputFrameCount(int frameCount, int sampleRate)
+{
+	if ((frameCount != s_ps2XaCountCacheFrames) || (sampleRate != s_ps2XaCountCacheRate))
+	{
+		s_ps2XaCountCacheValue = NativeAudio_GetXAOutputFrameCountUncached(frameCount, sampleRate);
+		s_ps2XaCountCacheFrames = frameCount;
+		s_ps2XaCountCacheRate = sampleRate;
+	}
+	return s_ps2XaCountCacheValue;
+}
+
+internal u64 NativeAudio_GetXAOutputFrameCountUncached(int frameCount, int sampleRate)
+#else
+internal u64 NativeAudio_GetXAOutputFrameCount(int frameCount, int sampleRate)
+#endif
 {
 	if ((frameCount <= 0) || (sampleRate <= 0))
 	{
@@ -906,6 +1048,48 @@ internal void NativeAudio_UpdateXAPositionFromOutputFrameNoLock(void)
 		return;
 	}
 
+#if defined(CTR_PS2)
+	// NOTE: PS2 build. positionFp = floor(frame * rate * 65536 / 44100). When
+	// the frame only moved forward by one, add a precomputed step (quotient +
+	// remainder) instead of a 64-bit divide per sample. Same exact result.
+	{
+		static u64 s_trackFrame = ~0ull;
+		static int s_trackRate = -1;
+		static u64 s_trackQuot = 0;
+		static u32 s_trackRem = 0;
+		static u32 s_stepQuot = 0;
+		static u32 s_stepRem = 0;
+		const u64 frame = s_audio.xa.outputFrame;
+		const int rate = s_audio.xa.sampleRate;
+
+		if ((rate == s_trackRate) && (frame == s_trackFrame + 1) && (rate <= 0xffff))
+		{
+			s_trackQuot += s_stepQuot;
+			s_trackRem += s_stepRem;
+			if (s_trackRem >= NATIVE_AUDIO_SAMPLE_RATE)
+			{
+				s_trackRem -= NATIVE_AUDIO_SAMPLE_RATE;
+				s_trackQuot++;
+			}
+		}
+		else
+		{
+			const u64 num = (frame * (u64)rate) << NATIVE_AUDIO_FP_SHIFT;
+			s_trackQuot = num / NATIVE_AUDIO_SAMPLE_RATE;
+			s_trackRem = (u32)(num - s_trackQuot * NATIVE_AUDIO_SAMPLE_RATE);
+			if (rate != s_trackRate)
+			{
+				const u32 step = (u32)rate << NATIVE_AUDIO_FP_SHIFT; // rate <= 0xffff
+				s_stepQuot = step / NATIVE_AUDIO_SAMPLE_RATE;
+				s_stepRem = step % NATIVE_AUDIO_SAMPLE_RATE;
+				s_trackRate = rate;
+			}
+		}
+		s_trackFrame = frame;
+		s_audio.xa.positionFp = s_trackQuot;
+		return;
+	}
+#endif
 	s_audio.xa.positionFp = ((s_audio.xa.outputFrame * (u64)s_audio.xa.sampleRate) << NATIVE_AUDIO_FP_SHIFT) / NATIVE_AUDIO_SAMPLE_RATE;
 }
 
@@ -1169,7 +1353,12 @@ internal void NativeAudio_AdsrRunEnvelopeStep(struct NativeAudioVoice *voice, in
 	}
 	else if (exponential && decreasing)
 	{
+#if defined(CTR_PS2)
+		// |adsrStep| <= 8 << 11 and |adsrLevel| <= 0x8000: fits in 32 bits.
+		adsrStep = (adsrStep * voice->adsrLevel) / 0x8000;
+#else
 		adsrStep = (int)(((s64)adsrStep * voice->adsrLevel) / 0x8000);
+#endif
 		if (voice->adsrPhase == NATIVE_AUDIO_ADSR_RELEASE && adsrStep == 0 && voice->adsrLevel > 0)
 		{
 			adsrStep = -1;
@@ -2785,6 +2974,10 @@ int NativeAudio_RestoreState(const void *src, int srcSize)
 	s_audio.reverbVoiceBits = snapshot->reverbVoiceBits;
 	s_audio.reverbAttr = snapshot->reverbAttr;
 	s_audio.reverb = snapshot->reverb;
+#if defined(CTR_PS2)
+	s_ps2ReverbInputZeroRun = 0; // unknown history: recount
+	s_ps2ReverbOutputZeroRun = 0;
+#endif
 	s_audio.commonAttr = snapshot->commonAttr;
 	memcpy(s_audio.spu.memory, snapshot->spuSampleMem, sizeof(s_audio.spu.memory));
 	s_audio.spu.transferOffset = snapshot->spuTransferOffset;
