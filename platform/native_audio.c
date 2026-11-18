@@ -1191,10 +1191,14 @@ internal int NativeAudio_ZigZagInterpolateXASampleNoLock(int channel)
 
 	// NOTE: PS2 build fast path, same result as the generic loop below, for
 	// both 37.8 kHz and 18.9 kHz XA (18.9 kHz reads each source frame twice).
-	// 32-bit group/phase math (no libgcc 64-bit divide), taps read straight
-	// from the ring when they are all decoded, and both channels at once.
+	// The generic loop asks for every tap separately, and a tap that is not
+	// decoded yet retries the disc read and the cache lookup each time (29 taps
+	// x 2 channels per sample while the drive is busy loading). Here the decode
+	// is tried once for the newest needed frame, and then every tap is read
+	// straight from the ring with the same rules (missing/out of range = 0).
+	// Both channels are computed at once.
 	if (((s_audio.xa.sampleRate == XA_SAMPLE_RATE_37800) || (s_audio.xa.sampleRate == XA_SAMPLE_RATE_18900)) &&
-	    (s_audio.xa.outputFrame <= 0xffffffffull) && (s_audio.xaStream.sectors != NULL))
+	    (s_audio.xa.outputFrame <= 0xffffffffull))
 	{
 		struct NativeAudioXaStream *xs = &s_audio.xaStream;
 		const int shift = (s_audio.xa.sampleRate == XA_SAMPLE_RATE_18900) ? 1 : 0;
@@ -1202,41 +1206,57 @@ internal int NativeAudio_ZigZagInterpolateXASampleNoLock(int channel)
 		const u32 group32 = outputFrame32 / NATIVE_AUDIO_XA_ZIGZAG_PHASES;
 		const int phase32 = (int)(outputFrame32 - (group32 * NATIVE_AUDIO_XA_ZIGZAG_PHASES));
 		const s64 newestPseudo = (s64)(group32 + 1u) * NATIVE_AUDIO_XA_ZIGZAG_INPUTS - 1;
-		const s64 oldestPseudo = newestPseudo - (NATIVE_AUDIO_XA_ZIGZAG_TAPS - 1);
+		int sumLeft = 0;
+		int sumRight = 0;
 
-		if ((oldestPseudo >= 0) && ((newestPseudo >> shift) < (s64)s_audio.xa.frameCount))
+		if (xs->sectors != NULL)
 		{
-			const u64 newestSrc = (u64)(newestPseudo >> shift);
-			const u64 oldestSrc = (u64)(oldestPseudo >> shift);
-
-			while ((newestSrc >= xs->decodedFrames) && NativeAudio_XaStreamDecodeNextSectorNoLock())
+			// Decode up to the newest frame any tap needs (taps past the end of
+			// the track are never decoded, like in the generic path).
+			const s64 oldestPseudo = (newestPseudo >= (NATIVE_AUDIO_XA_ZIGZAG_TAPS - 1)) ? (newestPseudo - (NATIVE_AUDIO_XA_ZIGZAG_TAPS - 1)) : 0;
+			if ((newestPseudo >= 0) && (s_audio.xa.frameCount > 0) && ((u64)(oldestPseudo >> shift) < (u64)s_audio.xa.frameCount))
 			{
+				u64 target = (u64)(newestPseudo >> shift);
+				if (target >= (u64)s_audio.xa.frameCount)
+				{
+					target = (u64)s_audio.xa.frameCount - 1u;
+				}
+				while ((target >= xs->decodedFrames) && NativeAudio_XaStreamDecodeNextSectorNoLock())
+				{
+				}
 			}
 
-			if ((newestSrc < xs->decodedFrames) && ((xs->decodedFrames - oldestSrc) <= NATIVE_AUDIO_XA_RING_FRAMES))
+			// Decoding can shorten frameCount (real end of the track): read it now.
+			const u64 frameCount = (s_audio.xa.frameCount > 0) ? (u64)s_audio.xa.frameCount : 0u;
+			const u64 decoded = xs->decodedFrames;
+			s64 pseudo = newestPseudo;
+
+			for (int tap = 0; tap < NATIVE_AUDIO_XA_ZIGZAG_TAPS; tap++, pseudo--)
 			{
-				int sumLeft = 0;
-				int sumRight = 0;
-				u32 pseudo = (u32)newestPseudo;
-
-				for (int tap = 0; tap < NATIVE_AUDIO_XA_ZIGZAG_TAPS; tap++, pseudo--)
+				if (pseudo < 0)
 				{
-					const s16 *frame = &xs->ring[((pseudo >> shift) & (NATIVE_AUDIO_XA_RING_FRAMES - 1)) * NATIVE_AUDIO_CHANNELS];
-					const int coeff = s_xaZigZagTable[tap][phase32];
-					sumLeft += ((int)frame[0] * coeff) >> 15;
-					sumRight += ((int)frame[1] * coeff) >> 15;
+					break; // this and all older taps read 0
 				}
-
-				if (channel == 0)
+				const u64 src = (u64)(pseudo >> shift);
+				if ((src >= frameCount) || (src >= decoded) || ((decoded - src) > NATIVE_AUDIO_XA_RING_FRAMES))
 				{
-					s_ps2XaZzRightValid = 1;
-					s_ps2XaZzRightFrame = s_audio.xa.outputFrame;
-					s_ps2XaZzRightValue = NativeAudio_Clamp16(sumRight);
-					return NativeAudio_Clamp16(sumLeft);
+					continue; // 0, like NativeAudio_GetXAPcmSampleAtFrameNoLock
 				}
-				return NativeAudio_Clamp16(sumRight);
+				const s16 *frame = &xs->ring[((u32)src & (NATIVE_AUDIO_XA_RING_FRAMES - 1)) * NATIVE_AUDIO_CHANNELS];
+				const int coeff = s_xaZigZagTable[tap][phase32];
+				sumLeft += ((int)frame[0] * coeff) >> 15;
+				sumRight += ((int)frame[1] * coeff) >> 15;
 			}
 		}
+
+		if (channel == 0)
+		{
+			s_ps2XaZzRightValid = 1;
+			s_ps2XaZzRightFrame = s_audio.xa.outputFrame;
+			s_ps2XaZzRightValue = NativeAudio_Clamp16(sumRight);
+			return NativeAudio_Clamp16(sumLeft);
+		}
+		return NativeAudio_Clamp16(sumRight);
 	}
 #endif
 
