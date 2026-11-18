@@ -1,0 +1,41 @@
+# Compila el port de PS2 en cada push usando la imagen oficial de ps2dev.
+# El resultado (ctr_ps2.elf + log de compilacion) se descarga desde la pestana
+# Actions -> la ejecucion correspondiente -> "Artifacts".
+
+name: PS2 build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-ps2:
+    runs-on: ubuntu-latest
+    container: ps2dev/ps2dev:latest
+
+    steps:
+      - name: Install build tools
+        run: apk add --no-cache make bash
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build ctr_ps2.elf
+        shell: bash
+        run: |
+          set -o pipefail
+          make -f Makefile.ps2 2>&1 | tee build-log.txt
+
+      - name: Show size
+        if: success()
+        run: mips64r5900el-ps2-elf-size ctr_ps2.elf | tee -a build-log.txt
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctr_ps2
+          path: |
+            ctr_ps2.elf
+            build-log.txt
+          if-no-files-found: warn
