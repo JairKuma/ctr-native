@@ -358,7 +358,7 @@ int CdControl(uint8_t com, uint8_t *param, uint8_t *result)
 	return 1;
 }
 
-int CdRead(int sectors, uint32_t *buf, int mode)
+int CdRead(int sectors, u32 *buf, int mode)
 {
 	(void)mode;
 

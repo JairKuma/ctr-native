@@ -76,13 +76,13 @@ int MoveImage(RECT16 *rect, int x, int y)
 	return 0;
 }
 
-int StoreImage(RECT16 *rect, uint32_t *p)
+int StoreImage(RECT16 *rect, u32 *p)
 {
 	NativeRenderer_ReadVRAM((unsigned short *)p, rect->x, rect->y, rect->w, rect->h);
 	return 0;
 }
 
-int StoreImage2(RECT16 *rect, uint32_t *p)
+int StoreImage2(RECT16 *rect, u32 *p)
 {
 	return StoreImage(rect, p);
 }
@@ -111,7 +111,7 @@ int SetGraphDebug(int level)
 	return 0;
 }
 
-uint32_t *ClearOTag(uint32_t *ot, int n)
+u32 *ClearOTag(u32 *ot, int n)
 {
 	OT_TAG *ptag_list;
 
@@ -134,7 +134,7 @@ uint32_t *ClearOTag(uint32_t *ot, int n)
 	return NULL;
 }
 
-uint32_t *ClearOTagR(uint32_t *ot, int n)
+u32 *ClearOTagR(u32 *ot, int n)
 {
 	OT_TAG *ptag_list;
 
@@ -285,9 +285,9 @@ void SetDrawMove(DR_MOVE *p, RECT16 *rect, int x, int y)
 	setlen(p, len);
 }
 
-uint32_t DrawSyncCallback(void (*func)(void))
+u32 DrawSyncCallback(void (*func)(void))
 {
-	uint32_t old = (uint32_t)(uintptr_t)drawsync_callback;
+	u32 old = (u32)(uintptr_t)drawsync_callback;
 
 	drawsync_callback = func;
 	return old;
@@ -310,7 +310,7 @@ void DrawOTag(void *p)
 			ClearSplits();
 		}
 
-		ParsePrimitivesLinkedList((uint32_t *)p, 0);
+		ParsePrimitivesLinkedList((u32 *)p, 0);
 		DrawAllSplits();
 	} while (g_dbg_emulatorPaused);
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_DRAW_OTAG);
@@ -329,7 +329,7 @@ void DrawPrim(void *p)
 		ClearSplits();
 	}
 
-	ParsePrimitivesLinkedList((uint32_t *)p, 1);
+	ParsePrimitivesLinkedList((u32 *)p, 1);
 }
 
 void AddPrim(void *ot, void *p)

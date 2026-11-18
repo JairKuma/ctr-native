@@ -73,7 +73,7 @@ int ResetRCnt(int spec)
 	return 0;
 }
 
-int OpenEvent(unsigned int event, int spec, int mode, int32_t (*func)())
+int OpenEvent(unsigned int event, int spec, int mode, s32 (*func)())
 {
 	(void)event;
 	(void)spec;
