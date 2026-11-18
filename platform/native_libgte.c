@@ -90,14 +90,14 @@ void SetTransMatrix(MATRIX *m)
 
 #define MAX_NUM_MATRICES 20
 s32 matrixLevel = 0;
-MATRIX stack[MAX_NUM_MATRICES];    // unk_410
-MATRIX *currentMatrix = &stack[0]; // unk_40C
+static MATRIX gteMatrixStack[MAX_NUM_MATRICES];    // unk_410
+MATRIX *currentMatrix = &gteMatrixStack[0]; // unk_40C
 
 void PushMatrix()
 {
 	if (matrixLevel < 20)
 	{
-		MATRIX *m = &stack[matrixLevel]; //$t7
+		MATRIX *m = &gteMatrixStack[matrixLevel]; //$t7
 
 		gte_ReadRotMatrix(m);
 		gte_sttr(m->t);
@@ -117,7 +117,7 @@ void PopMatrix()
 	{
 		currentMatrix--;
 		matrixLevel--;
-		MATRIX *m = &stack[matrixLevel]; //$t7
+		MATRIX *m = &gteMatrixStack[matrixLevel]; //$t7
 
 		gte_SetRotMatrix(m);
 		gte_SetTransMatrix(m);
