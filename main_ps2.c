@@ -80,11 +80,10 @@
 // Partidas guardadas en la memory card de PS2 (ranura 1).
 #define PS2_MEMCARD_ROOT "mc0:/CTRNATIVE"
 
-// Carga los modulos del IOP que hacen falta para la memory card (y mas
-// adelante los mandos). Los de rom0: vienen en la BIOS de cualquier PS2.
+// Carga los modulos del IOP que hacen falta para la memory card y los mandos. Los de rom0: vienen en la BIOS de cualquier PS2.
 static void Ps2Main_LoadIopModules(void)
 {
-	static const char *const modules[] = {"rom0:SIO2MAN", "rom0:MCMAN", "rom0:MCSERV"};
+	static const char *const modules[] = {"rom0:SIO2MAN", "rom0:MCMAN", "rom0:MCSERV", "rom0:PADMAN"};
 
 	for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]); i++)
 	{
