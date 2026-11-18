@@ -92,6 +92,8 @@ internal void Ps2_EmitVBlank(void)
 	}
 
 	NativeAudio_StepVBlank();
+	// Rellena la cola de audsrv con lo que haya generado la SPU emulada.
+	Ps2AudioOut_Pump();
 	s_nativeVBlankCount++;
 }
 
@@ -277,179 +279,9 @@ void Platform_EndScene(void)
 	NativeRenderer_SwapWindow();
 }
 
-// ---------------------------------------------------------------------------
-// Diagnostico de visibilidad (temporal): cada ~60 frames imprime que decide el
-// juego sobre que partes del nivel se ven. Sirve para comparar la intro de la
-// carrera (donde solo sale el cielo) con la carrera normal.
-// ---------------------------------------------------------------------------
-
-global_variable int s_visDiagFrame = 0;
-
-internal int Ps2Diag_CountBits(const int *words, int bitCount)
-{
-	int total = 0;
-
-	if (words == NULL)
-	{
-		return -1;
-	}
-
-	for (int i = 0; i < (bitCount + 31) / 32; i++)
-	{
-		u32 w = (u32)words[i];
-		while (w != 0)
-		{
-			w &= w - 1;
-			total++;
-		}
-	}
-
-	return total;
-}
-
-internal void Ps2Diag_PrintVisibility(void)
-{
-	struct GameTracker *gGT = sdata->gGT;
-
-	if (gGT == NULL)
-	{
-		return;
-	}
-
-	struct CameraDC *cam = &gGT->cameraDC[0];
-	struct PushBuffer *pb = &gGT->pushBuffer[0];
-	struct Driver *driver = gGT->drivers[0];
-	struct mesh_info *mesh = (gGT->level1 != NULL) ? gGT->level1->ptr_mesh_info : NULL;
-	int leafBits = -1;
-	int leafTotal = 0;
-	int *leafSrc = NULL;
-
-	if ((gGT->visMem1 != NULL) && (mesh != NULL))
-	{
-		leafTotal = mesh->numBspNodes;
-		leafBits = Ps2Diag_CountBits(gGT->visMem1->visLeafList[0], leafTotal);
-		leafSrc = gGT->visMem1->visLeafSrc[0];
-	}
-
-	const int spawnCount = ((gGT->level1 != NULL) && (gGT->level1->ptrSpawnType1 != NULL)) ? gGT->level1->ptrSpawnType1->count : -1;
-
-	printf("[CTR PS2] vis: f %d level %d mode1 %08x render %08x | cam mode %d hit %d quad %p camLeafSrc %p | drv under %p | visLeafSrc %p visible leaves %d/%d drawn %d | "
-	       "pos %d,%d,%d dist %d | trans frame %d/%d blend %d flags %08x st1 %d\n",
-	       gGT->frameTimer_MainFrame_ResetDB, gGT->levelID, (unsigned)gGT->gameMode1, (unsigned)gGT->renderFlags, cam->cameraMode, (int)cam->quadBlockSearchHit,
-	       (void *)cam->ptrQuadBlock, (void *)cam->visLeafSrc, (driver != NULL) ? (void *)driver->underDriver : NULL, (void *)leafSrc, leafBits, leafTotal,
-	       gGT->bspLeafsDrawn, pb->pos.x, pb->pos.y, pb->pos.z, pb->distanceToScreen_PREV, cam->transitionFrame, cam->transitionFrameCount, cam->transitionBlend,
-	       (unsigned)cam->flags, spawnCount);
-}
-
-// Prueba directa (una vez por carrera) de la camara de la intro: datos del
-// recorrido, un RotTrans con una matriz conocida y el resultado de
-// CAM_StartLine_FlyIn para varios fotogramas.
-global_variable int s_flyInProbeDone = 0;
-
-internal void Ps2Diag_FlyInProbe(struct GameTracker *gGT)
-{
-	struct Level *lev = gGT->level1;
-
-	if ((lev == NULL) || (lev->ptrSpawnType1 == NULL))
-	{
-		printf("[CTR PS2] flyin: no level / spawn data\n");
-		return;
-	}
-
-	struct SpawnType1 *st1 = lev->ptrSpawnType1;
-	if (st1->count < 4)
-	{
-		printf("[CTR PS2] flyin: st1 count %d (no fly-in)\n", st1->count);
-		return;
-	}
-
-	void **pointers = ST1_GETPOINTERS(st1);
-	u8 *cameraPath = (u8 *)pointers[ST1_CAMERA_PATH];
-	const s16 *pathStart = (const s16 *)cameraPath;
-	const s16 *pathEnd = (const s16 *)(cameraPath + 0x354);
-
-	printf("[CTR PS2] flyin: st1 %p count %d cameraPath %p\n", (void *)st1, st1->count, (void *)cameraPath);
-	printf("[CTR PS2] flyin: start[0] %d,%d,%d start[1] %d,%d,%d start[70] %d,%d,%d\n", pathStart[0], pathStart[1], pathStart[2], pathStart[3], pathStart[4],
-	       pathStart[5], pathStart[210], pathStart[211], pathStart[212]);
-	printf("[CTR PS2] flyin: end[0] %d,%d,%d end[1] %d,%d,%d end[70] %d,%d,%d\n", pathEnd[0], pathEnd[1], pathEnd[2], pathEnd[3], pathEnd[4], pathEnd[5],
-	       pathEnd[210], pathEnd[211], pathEnd[212]);
-	printf("[CTR PS2] flyin: spawn0 pos %d,%d,%d rot %d,%d,%d | spawn1 %d,%d,%d | spawn2 %d,%d,%d\n", lev->DriverSpawn[0].pos.x, lev->DriverSpawn[0].pos.y,
-	       lev->DriverSpawn[0].pos.z, lev->DriverSpawn[0].rot.x, lev->DriverSpawn[0].rot.y, lev->DriverSpawn[0].rot.z, lev->DriverSpawn[1].pos.x,
-	       lev->DriverSpawn[1].pos.y, lev->DriverSpawn[1].pos.z, lev->DriverSpawn[2].pos.x, lev->DriverSpawn[2].pos.y, lev->DriverSpawn[2].pos.z);
-
-	// RotTrans con matriz identidad y traslacion (100,200,300): debe dar 110,220,330.
-	{
-		MATRIX m;
-		SVECTOR v;
-		VECTOR out;
-		s32 flag = 0;
-
-		memset(&m, 0, sizeof(m));
-		m.m[0][0] = 4096;
-		m.m[1][1] = 4096;
-		m.m[2][2] = 4096;
-		m.t[0] = 100;
-		m.t[1] = 200;
-		m.t[2] = 300;
-		memset(&v, 0, sizeof(v));
-		v.vx = 10;
-		v.vy = 20;
-		v.vz = 30;
-		memset(&out, 0, sizeof(out));
-
-		SetRotMatrix(&m);
-		SetTransMatrix(&m);
-		RotTrans(&v, &out, &flag);
-		printf("[CTR PS2] flyin: RotTrans test -> %d,%d,%d (expected 110,220,330) flag %08x\n", (int)out.vx, (int)out.vy, (int)out.vz, (unsigned)flag);
-	}
-
-	// La funcion real con varios fotogramas.
-	{
-		static const s32 frames[] = {0, 50, 100, 150};
-		struct FlyInData flyInData;
-
-		flyInData.ptrEnd = cameraPath + 0x354;
-		flyInData.ptrStart = cameraPath;
-		flyInData.frameCount1 = 0x96;
-		flyInData.frameCount2 = 0x8e;
-
-		for (size_t i = 0; i < sizeof(frames) / sizeof(frames[0]); i++)
-		{
-			SVec3 pos;
-			SVec3 rot;
-
-			memset(&pos, 0, sizeof(pos));
-			memset(&rot, 0, sizeof(rot));
-			CAM_StartLine_FlyIn(&flyInData, 0x96, frames[i], &pos, &rot);
-			printf("[CTR PS2] flyin: frame %d -> pos %d,%d,%d rot %d,%d,%d\n", (int)frames[i], pos.x, pos.y, pos.z, rot.x, rot.y, rot.z);
-		}
-	}
-}
-
 void Platform_EndFrame(void)
 {
 	Platform_EndScene();
-
-	if ((sdata->gGT != NULL) && ((sdata->gGT->gameMode1 & START_OF_RACE) != 0))
-	{
-		if (!s_flyInProbeDone)
-		{
-			s_flyInProbeDone = 1;
-			Ps2Diag_FlyInProbe(sdata->gGT);
-		}
-	}
-	else
-	{
-		s_flyInProbeDone = 0;
-	}
-
-	// Durante la intro de la carrera (START_OF_RACE) se muestrea mas a menudo.
-	const int startOfRace = (sdata->gGT != NULL) && ((sdata->gGT->gameMode1 & START_OF_RACE) != 0);
-	if (++s_visDiagFrame >= (startOfRace ? 10 : 60))
-	{
-		s_visDiagFrame = 0;
-		Ps2Diag_PrintVisibility();
-	}
 }
 
 void Platform_PresentVRAMDisplay(void)

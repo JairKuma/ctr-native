@@ -29,7 +29,7 @@
 //    textura de 16 bits cae ahi, se usa directamente el framebuffer del GS
 //    (que ya es de 16 bits) en vez de la copia en RAM.
 //  - Recorte (scissor) y limpieza por zonas, para pantalla partida y menus.
-//  - Medidor de rendimiento en la consola cada ~2 segundos.
+//  - Medidor de rendimiento en la consola cada ~10 segundos.
 
 #include <macros.h>
 #include <psx/libgpu.h>
@@ -182,10 +182,6 @@ struct Ps2Stats
 	u32 gsClearsSkipped;
 };
 
-// Mensajes de diagnostico limitados para no llenar la consola.
-global_variable int s_diagClearLogs = 0;
-global_variable int s_diagBindLogs = 0;
-#define PS2_DIAG_MAX_LOGS 24
 global_variable struct Ps2Stats s_stats;
 global_variable clock_t s_statsStart = 0;
 
@@ -910,7 +906,8 @@ internal void Ps2Renderer_FlipNoWait(void)
 	gsKit_setactive(s_gs);
 }
 
-// Imprime un resumen cada ~2 segundos.
+// Imprime un resumen de rendimiento cada PS2_PERF_REPORT_SECONDS segundos.
+#define PS2_PERF_REPORT_SECONDS 10.0
 internal void Ps2Renderer_UpdateStats(void)
 {
 	s_stats.frames++;
@@ -923,7 +920,7 @@ internal void Ps2Renderer_UpdateStats(void)
 	}
 
 	const double seconds = (double)(now - s_statsStart) / (double)CLOCKS_PER_SEC;
-	if (seconds < 2.0)
+	if (seconds < PS2_PERF_REPORT_SECONDS)
 	{
 		return;
 	}
@@ -933,11 +930,6 @@ internal void Ps2Renderer_UpdateStats(void)
 	       (double)s_stats.frames / seconds, s_stats.triangles / frames,
 	       (double)s_stats.pageUploads / frames, (double)s_stats.clutUploads / frames, (double)s_stats.page16Uploads / frames,
 	       s_stats.surfaceBinds, s_stats.skippedOffscreen, (double)s_stats.queueFlushes / frames, s_stats.readbacks);
-
-	printf("[CTR PS2] perf2: tex tris/frame %u (4b %u 8b %u 16b %u) | untex tris/frame %u | dropped: fmt %u clut %u page %u p16 %u | fb pass2 skips %u | GS clears %u skipped %u\n",
-	       s_stats.texturedTris / frames, s_stats.texFormat[0] / frames, s_stats.texFormat[1] / frames, s_stats.texFormat[2] / frames,
-	       s_stats.untexturedTris / frames, s_stats.bindFail[0], s_stats.bindFail[1], s_stats.bindFail[2], s_stats.bindFail[3], s_stats.surfacePass2Skips,
-	       s_stats.gsClears, s_stats.gsClearsSkipped);
 
 	memset(&s_stats, 0, sizeof(s_stats));
 	s_statsStart = now;
@@ -1104,12 +1096,6 @@ void NativeRenderer_Clear(int x, int y, int w, int h, u8 r, u8 g, u8 b)
 	}
 
 	s_stats.gsClears++;
-	if (s_diagClearLogs < PS2_DIAG_MAX_LOGS)
-	{
-		s_diagClearLogs++;
-		printf("[CTR PS2] diag: GS clear vram(%d,%d %dx%d) disp(%d,%d %dx%d) color %02x%02x%02x pendingSplits %d\n", x, y, w, h, displayX, displayY, displayW,
-		       displayH, r, g, b, NativeGpu_HasPendingSplits());
-	}
 
 	const float scaleX = (float)s_gs->Width / (float)displayW;
 	const float scaleY = (float)s_gs->Height / (float)displayH;
@@ -1590,12 +1576,6 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 
 			if (!Ps2Tex_Bind(v0, &tex))
 			{
-				if (s_diagBindLogs < PS2_DIAG_MAX_LOGS)
-				{
-					s_diagBindLogs++;
-					printf("[CTR PS2] diag: textured tri dropped (format %d page 0x%x clut 0x%x pass %d)\n", (int)s_currentTexFormat, (unsigned)(u16)v0->page,
-					       (unsigned)(u16)v0->clut, s_semiTransPass);
-				}
 				continue;
 			}
 
