@@ -796,6 +796,13 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 	(void)height;
 	(void)fullscreen;
 
+	// main_ps2.c inicia el GS al principio (para los colores de diagnostico);
+	// Platform_Init lo vuelve a pedir despues.
+	if (s_gs != NULL)
+	{
+		return 1;
+	}
+
 	s_gs = gsKit_init_global();
 	if (s_gs == NULL)
 	{
@@ -933,6 +940,28 @@ internal void Ps2Renderer_UpdateStats(void)
 
 	memset(&s_stats, 0, sizeof(s_stats));
 	s_statsStart = now;
+}
+
+// Pinta toda la pantalla de un color (diagnostico de arranque en consola real,
+// donde no hay consola de texto). Se pintan los dos buffers.
+void Ps2Renderer_DebugScreen(u8 r, u8 g, u8 b)
+{
+	if (s_gs == NULL)
+	{
+		return;
+	}
+
+	for (int i = 0; i < 2; i++)
+	{
+		s_gs->PrimAlphaEnable = GS_SETTING_OFF;
+		gsKit_set_scissor(s_gs, GS_SCISSOR_RESET);
+		gsKit_clear(s_gs, GS_SETREG_RGBAQ(r, g, b, 0x80, 0x00));
+		Ps2Renderer_FlushQueue();
+		gsKit_finish();
+		Ps2Renderer_FlipNoWait();
+	}
+
+	Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
 }
 
 void NativeRenderer_SwapWindow(void)
