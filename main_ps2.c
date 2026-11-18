@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <kernel.h>
+#include <loadfile.h>
 #include <sifrpc.h>
 
 #define _EnterCriticalSection(x)
@@ -75,6 +76,22 @@
 #endif
 
 #define PS2_PATH_MAX 256
+
+// Partidas guardadas en la memory card de PS2 (ranura 1).
+#define PS2_MEMCARD_ROOT "mc0:/CTRNATIVE"
+
+// Carga los modulos del IOP que hacen falta para la memory card (y mas
+// adelante los mandos). Los de rom0: vienen en la BIOS de cualquier PS2.
+static void Ps2Main_LoadIopModules(void)
+{
+	static const char *const modules[] = {"rom0:SIO2MAN", "rom0:MCMAN", "rom0:MCSERV"};
+
+	for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]); i++)
+	{
+		const int id = SifLoadModule(modules[i], 0, NULL);
+		printf("[CTR PS2] Load %s: %s (%d)\n", modules[i], (id >= 0) ? "ok" : "FAILED", id);
+	}
+}
 
 // Comprueba si existe <dir>/assets/ctr-u.bin o <dir>/assets/BIGFILE.BIG.
 static int Ps2Main_DirHasAssets(const char *dir)
@@ -161,6 +178,7 @@ static const char *Ps2Main_FindBaseDir(int argc, char *argv[])
 int main(int argc, char *argv[])
 {
 	SifInitRpc(0);
+	Ps2Main_LoadIopModules();
 
 	printf("[CTR PS2] CTR Native %s starting...\n", CTR_NATIVE_VERSION);
 
@@ -186,6 +204,18 @@ int main(int argc, char *argv[])
 	if (chdir(NativeAssets_GetBaseDir()) != 0)
 	{
 		printf("[CTR PS2] Warning: chdir(%s) failed\n", NativeAssets_GetBaseDir());
+	}
+
+	// En PC las partidas van a la carpeta "memcards" junto al juego. En PS2 van
+	// a la memory card: es lo correcto en hardware real y, ademas, el host: de
+	// PCSX2 no permite crear ni listar carpetas.
+	if (NativeMemcard_SetRoot(PS2_MEMCARD_ROOT) != NATIVE_MEMCARD_OK)
+	{
+		printf("[CTR PS2] Warning: could not set memcard root %s\n", PS2_MEMCARD_ROOT);
+	}
+	else
+	{
+		printf("[CTR PS2] Saves: %s\n", PS2_MEMCARD_ROOT);
 	}
 
 	if (!NativeAssets_Validate())
