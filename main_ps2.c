@@ -85,6 +85,21 @@
 // Partidas guardadas en la memory card de PS2 (ranura 1).
 #define PS2_MEMCARD_ROOT "mc0:/CTRNATIVE"
 
+// --- Colores de diagnostico (consola real, sin texto) ------------------------
+// La pantalla muestra el color del ULTIMO paso completado; si se cuelga, el
+// fallo esta en el paso siguiente:
+//   azul      GS iniciado
+//   morado    rom0:SIO2MAN cargado
+//   rosa      rom0:MCMAN cargado
+//   naranja   rom0:MCSERV cargado
+//   amarillo  rom0:PADMAN cargado
+//   celeste   rom0:LIBSD cargado
+//   blanco    audsrv.irx cargado
+//   gris      audsrv iniciado; buscando CTR_U.BIN
+//   verde     CTR_U.BIN encontrado; arrancando el juego
+//   rojo      CTR_U.BIN NO encontrado (se queda en rojo)
+void Ps2Renderer_DebugScreen(u8 r, u8 g, u8 b);
+
 // audsrv.irx va incrustado en el ELF (Makefile.ps2 lo genera con bin2c).
 extern unsigned char audsrv_irx[];
 extern unsigned int size_audsrv_irx;
@@ -94,11 +109,19 @@ extern unsigned int size_audsrv_irx;
 static void Ps2Main_LoadIopModules(void)
 {
 	static const char *const modules[] = {"rom0:SIO2MAN", "rom0:MCMAN", "rom0:MCSERV", "rom0:PADMAN", "rom0:LIBSD"};
+	static const u8 colors[][3] = {
+	    {0x60, 0x00, 0xa0}, // morado
+	    {0xff, 0x60, 0xc0}, // rosa
+	    {0xff, 0x80, 0x00}, // naranja
+	    {0xff, 0xff, 0x00}, // amarillo
+	    {0x40, 0xc0, 0xff}, // celeste
+	};
 
 	for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]); i++)
 	{
 		const int id = SifLoadModule(modules[i], 0, NULL);
 		printf("[CTR PS2] Load %s: %s (%d)\n", modules[i], (id >= 0) ? "ok" : "FAILED", id);
+		Ps2Renderer_DebugScreen(colors[i][0], colors[i][1], colors[i][2]);
 	}
 
 	// Permite cargar modulos desde la RAM del EE en BIOS antiguas.
@@ -107,6 +130,7 @@ static void Ps2Main_LoadIopModules(void)
 	int moduleResult = 0;
 	const int audsrvId = SifExecModuleBuffer(audsrv_irx, size_audsrv_irx, 0, NULL, &moduleResult);
 	printf("[CTR PS2] Load audsrv.irx: %s (%d, %d)\n", (audsrvId >= 0) ? "ok" : "FAILED", audsrvId, moduleResult);
+	Ps2Renderer_DebugScreen(0xff, 0xff, 0xff); // blanco
 }
 
 // Comprueba si existe <dir>/assets/ctr-u.bin o <dir>/assets/BIGFILE.BIG.
@@ -205,7 +229,11 @@ static const char *Ps2Main_FindBaseDir(int argc, char *argv[])
 	printf("[CTR PS2] Looking for CTR_U.BIN on the disc (cdrom0:)\n");
 	if (Ps2Main_FindDiscImage())
 	{
-		return "cdrom0:";
+		// Todo sale de CTR_U.BIN. La base solo sirve para buscar assets
+		// extraidos sueltos (mods), que en un disco nunca estan; cada busqueda
+		// fallida en el disco es lenta (busqueda en el lector). rom0: responde
+		// al instante que no existen.
+		return "rom0:";
 	}
 
 	for (size_t i = 0; i < sizeof(fallbacks) / sizeof(fallbacks[0]); i++)
@@ -223,14 +251,21 @@ static const char *Ps2Main_FindBaseDir(int argc, char *argv[])
 int main(int argc, char *argv[])
 {
 	SifInitRpc(0);
+
+	// El GS se inicia lo primero para poder mostrar colores de diagnostico.
+	NativeRenderer_InitialiseRender((char *)"Crash Team Racing", 640, 448, 1);
+	Ps2Renderer_DebugScreen(0x00, 0x00, 0xc0); // azul
+
 	Ps2Main_LoadIopModules();
 	Ps2AudioOut_Init();
+	Ps2Renderer_DebugScreen(0x80, 0x80, 0x80); // gris
 
 	printf("[CTR PS2] CTR Native %s starting...\n", CTR_NATIVE_VERSION);
 
 	const char *baseDir = Ps2Main_FindBaseDir(argc, argv);
 	if (baseDir == NULL)
 	{
+		Ps2Renderer_DebugScreen(0xc0, 0x00, 0x00); // rojo
 		printf("[CTR PS2] ERROR: assets/ctr-u.bin (or CTR_U.BIN on the disc) not found.\n");
 		printf("[CTR PS2] Put the ELF next to an 'assets' folder that contains ctr-u.bin,\n");
 		printf("[CTR PS2] or build a disc/ISO with CTR_U.BIN in its root.\n");
@@ -239,6 +274,7 @@ int main(int argc, char *argv[])
 	}
 
 	printf("[CTR PS2] Base: %s\n", baseDir);
+	Ps2Renderer_DebugScreen(0x00, 0xc0, 0x00); // verde
 
 	if (!NativeAssets_Init(baseDir))
 	{
