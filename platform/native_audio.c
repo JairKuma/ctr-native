@@ -2536,7 +2536,10 @@ internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 				return 0;
 			}
 			const int sector = xs->scanSector++;
-			if (!NativeDiscImage_ReadRawSectors(&xs->discFile, (u32)sector, 1, xs->sectors))
+			g_ps2DiscXaRead = 1; // usar el hueco de cache reservado para la XA
+			const int readOk = NativeDiscImage_ReadRawSectors(&xs->discFile, (u32)sector, 1, xs->sectors);
+			g_ps2DiscXaRead = 0;
+			if (!readOk)
 			{
 				break;
 			}
@@ -3107,6 +3110,8 @@ unsigned long long g_ps2ProfVoiceCycles = 0;
 unsigned long long g_ps2ProfReverbCycles = 0;
 unsigned long long g_ps2ProfVoiceSamples = 0; // voces sonando x muestras
 unsigned long long g_ps2ProfMixFrames = 0;
+unsigned long long g_ps2ProfXaCdCycles = 0; // esperando al disco por la XA
+extern unsigned long long g_ps2ProfCdCycles; // ps2_audio_out.c
 
 static inline u32 NativeAudio_Ps2Now(void)
 {
@@ -3132,6 +3137,9 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 	int i;
 
 	PS2_AUDIO_PROF_MARK(profT0);
+#if defined(CTR_PS2)
+	const unsigned long long profCd0 = g_ps2ProfCdCycles;
+#endif
 	if (s_audio.xa.active && (s_audio.xaStream.sectors != NULL))
 	{
 		u64 outputFrameCount = NativeAudio_GetXAOutputFrameCount(s_audio.xa.frameCount, s_audio.xa.sampleRate);
@@ -3162,6 +3170,9 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 	}
 
 	PS2_AUDIO_PROF_MARK(profT1);
+#if defined(CTR_PS2)
+	const unsigned long long profXaCd = g_ps2ProfCdCycles - profCd0;
+#endif
 	if (!s_audio.muted)
 	{
 		for (i = 0; i < NATIVE_AUDIO_SPU_VOICE_COUNT; i++)
@@ -3224,7 +3235,11 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 	*outRight = (s16)NativeAudio_Clamp16(mixRight);
 #if defined(CTR_PS2)
 	PS2_AUDIO_PROF_MARK(profT3);
-	PS2_AUDIO_PROF_ADD(g_ps2ProfXaCycles, profT0, profT1);
+	{
+		const unsigned long long xaAll = (u32)(profT1 - profT0);
+		g_ps2ProfXaCycles += (xaAll > profXaCd) ? (xaAll - profXaCd) : 0ull;
+		g_ps2ProfXaCdCycles += profXaCd;
+	}
 	PS2_AUDIO_PROF_ADD(g_ps2ProfVoiceCycles, profT1, profT2);
 	PS2_AUDIO_PROF_ADD(g_ps2ProfReverbCycles, profT2, profT3);
 	g_ps2ProfMixFrames++;

@@ -143,6 +143,12 @@ static u8 *s_nativeDiscImageCache = s_nativeDiscImageCacheSlots[0];
 static u32 s_nativeDiscImageCacheStart = 0;
 static u32 s_nativeDiscImageCacheCount = 0;
 static int s_nativeDiscImageActiveSlot = 0;
+// El ultimo hueco es SOLO para la musica XA (native_audio.c pone
+// g_ps2DiscXaRead = 1 mientras lee). Asi las cargas del juego no lo expulsan:
+// antes, en la intro, cada carga echaba a la XA de la cache y la XA tenia que
+// volver a leer lo mismo con un salto del lector (~125 ms) parando el juego.
+#define NATIVE_DISC_IMAGE_XA_SLOT (NATIVE_DISC_IMAGE_CACHE_SLOTS - 1)
+int g_ps2DiscXaRead = 0;
 #define NATIVE_DISC_IMAGE_CACHE_BYTES (NATIVE_DISC_IMAGE_CACHE_SECTORS * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE)
 
 // NOTE: PS2 build. When the image is on the real disc (cdrom0:), read it by
@@ -267,25 +273,40 @@ internal void NativeDiscImage_SelectCacheSlot(u32 lba)
 	s_nativeDiscImageSlotCount[s_nativeDiscImageActiveSlot] = s_nativeDiscImageCacheCount;
 
 	int chosen = -1;
-	for (int i = 0; i < NATIVE_DISC_IMAGE_CACHE_SLOTS; i++)
+	if (g_ps2DiscXaRead)
 	{
-		if ((s_nativeDiscImageSlotCount[i] != 0) && (lba >= s_nativeDiscImageSlotStart[i]) && (lba < s_nativeDiscImageSlotStart[i] + s_nativeDiscImageSlotCount[i]))
+		// Musica XA: siempre su hueco propio (se rellena si no tiene el sector).
+		chosen = NATIVE_DISC_IMAGE_XA_SLOT;
+		const u32 xaStart = s_nativeDiscImageSlotStart[chosen];
+		const u32 xaCount = s_nativeDiscImageSlotCount[chosen];
+		if ((xaCount == 0) || (lba < xaStart) || (lba >= xaStart + xaCount))
 		{
-			chosen = i;
-			break;
+			s_nativeDiscImageSlotCount[chosen] = 0;
 		}
 	}
-	if (chosen < 0)
+	else
 	{
-		chosen = 0;
-		for (int i = 1; i < NATIVE_DISC_IMAGE_CACHE_SLOTS; i++)
+		// Datos del juego: los demas huecos (el de la XA ni se busca ni se expulsa).
+		for (int i = 0; i < NATIVE_DISC_IMAGE_XA_SLOT; i++)
 		{
-			if (s_nativeDiscImageSlotUse[i] < s_nativeDiscImageSlotUse[chosen])
+			if ((s_nativeDiscImageSlotCount[i] != 0) && (lba >= s_nativeDiscImageSlotStart[i]) && (lba < s_nativeDiscImageSlotStart[i] + s_nativeDiscImageSlotCount[i]))
 			{
 				chosen = i;
+				break;
 			}
 		}
-		s_nativeDiscImageSlotCount[chosen] = 0;
+		if (chosen < 0)
+		{
+			chosen = 0;
+			for (int i = 1; i < NATIVE_DISC_IMAGE_XA_SLOT; i++)
+			{
+				if (s_nativeDiscImageSlotUse[i] < s_nativeDiscImageSlotUse[chosen])
+				{
+					chosen = i;
+				}
+			}
+			s_nativeDiscImageSlotCount[chosen] = 0;
+		}
 	}
 
 	s_nativeDiscImageSlotUse[chosen] = ++s_nativeDiscImageUseClock;
