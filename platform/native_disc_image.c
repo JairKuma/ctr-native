@@ -39,8 +39,22 @@ global_variable FILE *s_nativeDiscImageFile;
 global_variable struct NativeDiscImageFile s_nativeDiscImageRoot;
 global_variable int s_nativeDiscImageAvailable;
 
+#if defined(CTR_PS2)
+// NOTE: PS2 build. PS2 discs (ISO9660) only allow short upper-case names, so a
+// disc build stores the image as e.g. cdrom0:\CTR_U.BIN. main_ps2.c sets this
+// when it finds the image there; it takes precedence over assets/ctr-u.bin.
+const char *g_ps2DiscImagePathOverride = NULL;
+#endif
+
 internal int NativeDiscImage_FindHostImagePath(char *dst, size_t dstSize, NativeStr8 assetsDir)
 {
+#if defined(CTR_PS2)
+	if ((g_ps2DiscImagePathOverride != NULL) && (dst != NULL) && (dstSize > 0))
+	{
+		snprintf(dst, dstSize, "%s", g_ps2DiscImagePathOverride);
+		return 1;
+	}
+#endif
 #if defined(_WIN32)
 	return NativePath_Join(dst, dstSize, assetsDir, NATIVE_STR8_LIT(NATIVE_DISC_IMAGE_BIN_PATH));
 #else
