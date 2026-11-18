@@ -127,9 +127,12 @@ internal int NativeDiscImage_CheckRawSectorHeader(const u8 *sector)
 // time. Read a run of consecutive sectors at once and serve the following
 // requests from memory.
 #define NATIVE_DISC_IMAGE_CACHE_SECTORS 64u
-// Dos huecos de cache (el menos usado se reemplaza): asi la musica XA, que se
-// lee mientras suena, y la carga del nivel no se expulsan la una a la otra.
-#define NATIVE_DISC_IMAGE_CACHE_SLOTS 2
+// Varios huecos de cache (se reemplaza el menos usado). El juego lee de varias
+// zonas a la vez: el indice de archivos de la imagen de PS1 (lo consulta en cada
+// busqueda), los archivos que carga y la musica XA que suena. Con pocos huecos
+// se expulsan entre si y cada lectura es un salto del lector (~125 ms).
+// 6 huecos x ~150 KB = ~900 KB de memoria.
+#define NATIVE_DISC_IMAGE_CACHE_SLOTS 6
 static u8 s_nativeDiscImageCacheSlots[NATIVE_DISC_IMAGE_CACHE_SLOTS][NATIVE_DISC_IMAGE_CACHE_SECTORS * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE] __attribute__((aligned(64)));
 static u32 s_nativeDiscImageSlotStart[NATIVE_DISC_IMAGE_CACHE_SLOTS];
 static u32 s_nativeDiscImageSlotCount[NATIVE_DISC_IMAGE_CACHE_SLOTS];
