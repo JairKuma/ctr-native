@@ -256,12 +256,25 @@ void NativeRenderer_UpdateSwapIntervalState(int swapInterval)
 	(void)swapInterval;
 }
 
+// gsKit solo trae gsKit_sync_flip(), que ademas espera al VBlank. Aqui el ritmo
+// ya lo marca VSync() del juego, asi que solo intercambiamos los buffers: el
+// que acabamos de pintar pasa a mostrarse y el otro pasa a ser el de dibujo.
+internal void Ps2Renderer_FlipNoWait(void)
+{
+	if (!s_gs->FirstFrame && (s_gs->DoubleBuffering == GS_SETTING_ON))
+	{
+		GS_SET_DISPFB2(s_gs->ScreenBuffer[s_gs->ActiveBuffer & 1] / 8192, s_gs->Width / 64, s_gs->PSM, 0, 0);
+		s_gs->ActiveBuffer ^= 1;
+	}
+
+	gsKit_setactive(s_gs);
+}
+
 void NativeRenderer_SwapWindow(void)
 {
 	Ps2Renderer_FlushQueue();
 	gsKit_finish();
-	// Sin esperar al VBlank: el ritmo lo marca VSync() del juego.
-	gsKit_flip(s_gs);
+	Ps2Renderer_FlipNoWait();
 }
 
 // ---------------------------------------------------------------------------
