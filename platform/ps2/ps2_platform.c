@@ -61,6 +61,8 @@ internal int Ps2_VBlankHandler(int cause)
 {
 	(void)cause;
 	s_hwVBlankCount++;
+	// Despierta al hilo que entrega el audio a audsrv (ps2_audio_out.c).
+	Ps2AudioOut_OnVBlankIsr();
 	ExitHandler();
 	return 0;
 }

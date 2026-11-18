@@ -10,8 +10,10 @@
 //     lector, ps2_cd.c). Asi el audio y la musica XA avanzan con el reloj real,
 //     como en una PS1, aunque el juego vaya lento.
 //  2. GUARDAR: lo generado va a un FIFO propio en la EE (s_ps2AudioFifo).
-//  3. ENTREGAR: del FIFO a audsrv solo lo que cabe (audsrv_available), asi la
-//     EE nunca se queda bloqueada esperando a audsrv.
+//  3. ENTREGAR: un hilo propio (Ps2AudioOut_FeederThread), despertado por la
+//     interrupcion de VBlank 60 veces por segundo, pasa del FIFO a audsrv lo que
+//     cabe (audsrv_available). Asi audsrv recibe datos aunque el juego vaya lento
+//     (su buffer solo dura ~116 ms) y la EE nunca se bloquea esperando a audsrv.
 //
 // IMPORTANTE: el buffer de audsrv es pequeno (20480 bytes, ~116 ms) y si se
 // vacia, audsrv REPITE su ultimo bloque una y otra vez ("ty ty dog dog"). Si
@@ -19,6 +21,7 @@
 // silencio en vez de dejar que repita.
 
 #include <audsrv.h>
+#include <kernel.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -49,8 +52,10 @@ global_variable u32 s_ps2AudioDroppedFrames = 0;
 global_variable int s_ps2AudioInPump = 0;
 
 global_variable s16 s_ps2AudioFifo[PS2_AUDIO_FIFO_FRAMES * 2] __attribute__((aligned(64)));
-global_variable u32 s_ps2AudioFifoRead = 0;  // en frames, sin envolver
-global_variable u32 s_ps2AudioFifoWrite = 0; // en frames, sin envolver
+// FIFO de un productor (hilo principal, escribe) y un consumidor (hilo de
+// entrega, lee): cada indice lo modifica un solo hilo.
+global_variable volatile u32 s_ps2AudioFifoRead = 0;  // en frames, sin envolver
+global_variable volatile u32 s_ps2AudioFifoWrite = 0; // en frames, sin envolver
 global_variable s16 s_ps2AudioSilence[PS2_AUDIO_SILENCE_FRAMES * 2] __attribute__((aligned(64)));
 
 int Ps2AudioOut_Init(void)
@@ -71,6 +76,8 @@ int Ps2AudioOut_Init(void)
 	printf("[CTR PS2] audsrv ready\n");
 	return 1;
 }
+
+internal void Ps2AudioOut_StartFeeder(void);
 
 int Ps2AudioOut_Open(int freq, int channels)
 {
@@ -95,6 +102,7 @@ int Ps2AudioOut_Open(int freq, int channels)
 
 	audsrv_set_volume(MAX_VOLUME);
 	s_ps2AudioOpen = 1;
+	Ps2AudioOut_StartFeeder();
 	printf("[CTR PS2] Audio output: %d Hz, %d ch\n", freq, channels);
 	return 1;
 }
@@ -119,19 +127,21 @@ int Ps2AudioOut_Write(const void *data, int bytes)
 	const s16 *src = (const s16 *)data;
 	u32 frames = (u32)bytes / PS2_AUDIO_FRAME_BYTES;
 
+	u32 write = s_ps2AudioFifoWrite;
 	for (u32 i = 0; i < frames; i++)
 	{
-		if (s_ps2AudioFifoWrite - s_ps2AudioFifoRead >= PS2_AUDIO_FIFO_FRAMES)
+		if (write - s_ps2AudioFifoRead >= PS2_AUDIO_FIFO_FRAMES)
 		{
-			// FIFO lleno: se descarta lo mas antiguo (evita que crezca el retraso).
-			s_ps2AudioFifoRead++;
-			s_ps2AudioDroppedFrames++;
+			// FIFO lleno: se descarta lo nuevo (el indice de lectura es del otro hilo).
+			s_ps2AudioDroppedFrames += frames - i;
+			break;
 		}
-		const u32 slot = (s_ps2AudioFifoWrite & (PS2_AUDIO_FIFO_FRAMES - 1)) * 2;
+		const u32 slot = (write & (PS2_AUDIO_FIFO_FRAMES - 1)) * 2;
 		s_ps2AudioFifo[slot + 0] = src[i * 2 + 0];
 		s_ps2AudioFifo[slot + 1] = src[i * 2 + 1];
-		s_ps2AudioFifoWrite++;
+		write++;
 	}
+	s_ps2AudioFifoWrite = write; // publicar despues de copiar los datos
 
 	return bytes;
 }
@@ -158,7 +168,7 @@ int Ps2AudioOut_QueuedBytes(void)
 }
 
 internal u32 Ps2_GetHwVBlankCount(void); // ps2_platform.c
-global_variable u32 s_ps2AudioLastFlushVBlank = 0xffffffffu;
+global_variable u32 s_ps2AudioLastServiceVBlank = 0xffffffffu;
 
 // Pasa del FIFO a audsrv todo lo que quepa, sin bloquear. Si audsrv esta a
 // punto de vaciarse y no hay nada en el FIFO, le manda silencio.
@@ -212,7 +222,71 @@ internal void Ps2AudioOut_Flush(void)
 		s_ps2AudioSilenceFrames += PS2_AUDIO_SILENCE_FRAMES;
 	}
 
-	s_ps2AudioLastFlushVBlank = Ps2_GetHwVBlankCount();
+}
+
+// --- Hilo de entrega -------------------------------------------------------
+#define PS2_AUDIO_FEEDER_PRIORITY 32 // mas prioritario que el hilo principal
+#define PS2_AUDIO_MAIN_PRIORITY   64
+global_variable int s_ps2AudioFeedSema = -1;
+global_variable int s_ps2AudioFeederThread = -1;
+global_variable u8 s_ps2AudioFeederStack[16 * 1024] __attribute__((aligned(16)));
+extern void *_gp;
+
+// Desde la interrupcion de VBlank (ps2_platform.c): despierta al hilo.
+void Ps2AudioOut_OnVBlankIsr(void)
+{
+	if (s_ps2AudioFeedSema >= 0)
+	{
+		iSignalSema(s_ps2AudioFeedSema);
+	}
+}
+
+internal void Ps2AudioOut_FeederThread(void *arg)
+{
+	(void)arg;
+	for (;;)
+	{
+		WaitSema(s_ps2AudioFeedSema);
+		Ps2AudioOut_Flush();
+	}
+}
+
+internal void Ps2AudioOut_StartFeeder(void)
+{
+	if (s_ps2AudioFeederThread >= 0)
+	{
+		return;
+	}
+
+	ee_sema_t sema;
+	memset(&sema, 0, sizeof(sema));
+	sema.init_count = 0;
+	sema.max_count = 1;
+	s_ps2AudioFeedSema = CreateSema(&sema);
+	if (s_ps2AudioFeedSema < 0)
+	{
+		printf("[CTR PS2] audio feeder: CreateSema failed\n");
+		return;
+	}
+
+	// El hilo de entrega debe poder adelantarse al principal.
+	ChangeThreadPriority(GetThreadId(), PS2_AUDIO_MAIN_PRIORITY);
+
+	ee_thread_t thread;
+	memset(&thread, 0, sizeof(thread));
+	thread.func = (void *)Ps2AudioOut_FeederThread;
+	thread.stack = s_ps2AudioFeederStack;
+	thread.stack_size = sizeof(s_ps2AudioFeederStack);
+	thread.gp_reg = &_gp;
+	thread.initial_priority = PS2_AUDIO_FEEDER_PRIORITY;
+	s_ps2AudioFeederThread = CreateThread(&thread);
+	if (s_ps2AudioFeederThread < 0)
+	{
+		printf("[CTR PS2] audio feeder: CreateThread failed\n");
+		return;
+	}
+	StartThread(s_ps2AudioFeederThread, NULL);
+	printf("[CTR PS2] audio feeder thread started\n");
 }
 
 // Audio generado hasta este VBlank de hardware.
@@ -262,15 +336,14 @@ internal void Ps2AudioOut_Service(void)
 		}
 	}
 	s_ps2AudioInPump = 0;
-
-	Ps2AudioOut_Flush();
+	s_ps2AudioLastServiceVBlank = hw;
 }
 
-// Llamado mientras se espera al lector de disco (ver ps2_cd.c): como mucho una
-// vez por VBlank, para no saturar el IOP con llamadas mientras lee.
+// Llamado mientras se espera al lector de disco (ver ps2_cd.c): genera el audio
+// pendiente (como mucho una vez por VBlank) para que el FIFO no se vacie.
 void Ps2AudioOut_PumpIdle(void)
 {
-	if (s_ps2AudioInPump || (Ps2_GetHwVBlankCount() == s_ps2AudioLastFlushVBlank))
+	if (s_ps2AudioInPump || (Ps2_GetHwVBlankCount() == s_ps2AudioLastServiceVBlank))
 	{
 		return;
 	}
@@ -280,7 +353,7 @@ void Ps2AudioOut_PumpIdle(void)
 // Llamado en cada VBlank que recibe el juego (ps2_platform.c).
 void Ps2AudioOut_Pump(void)
 {
-	if (Ps2_GetHwVBlankCount() == s_ps2AudioLastFlushVBlank)
+	if (Ps2_GetHwVBlankCount() == s_ps2AudioLastServiceVBlank)
 	{
 		return; // ya atendido en este VBlank
 	}
