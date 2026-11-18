@@ -23,6 +23,13 @@
 //        cuarto     (Cs - 0)  * 0x20 + Cd = Cd + Cs / 4
 //  - Pantallas cargadas directamente en VRAM: se suben como textura CT16 (el
 //    formato de color de PS1 coincide con PSMCT16 del GS).
+//  - Efectos que leen la propia pantalla (fondo de la pausa, distorsiones): en
+//    PS1 el juego texturiza desde la zona de VRAM donde dibujo el fotograma. Aqui
+//    se recuerda que zona de VRAM corresponde a cada buffer del GS y, si una
+//    textura de 16 bits cae ahi, se usa directamente el framebuffer del GS
+//    (que ya es de 16 bits) en vez de la copia en RAM.
+//  - Recorte (scissor) y limpieza por zonas, para pantalla partida y menus.
+//  - Medidor de rendimiento en la consola cada ~2 segundos.
 
 #include <macros.h>
 #include <psx/libgpu.h>
@@ -38,6 +45,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define PS2_TEXTURE_ID_WHITE 1u
 #define PS2_TEXTURE_ID_VRAM  2u
@@ -127,6 +135,34 @@ global_variable u16 s_lastBindClut;
 global_variable u8 s_lastBindFormat;
 global_variable u8 s_lastBindProfile;
 global_variable GSTEXTURE s_lastBindTex;
+global_variable const void *s_lastBindSurface;
+
+// Zonas de VRAM de PS1 que ahora mismo estan en un buffer del GS.
+#define PS2_MAX_FB_SURFACES 2
+struct Ps2FbSurface
+{
+	int valid;
+	int x, y, w, h; // rectangulo en VRAM de PS1
+	u32 gsVram;     // buffer del GS que lo contiene
+};
+global_variable struct Ps2FbSurface s_fbSurfaces[PS2_MAX_FB_SURFACES];
+global_variable int s_fbSurfaceNext = 0;
+global_variable const struct Ps2FbSurface *s_boundSurface = NULL;
+
+// Estadisticas para el medidor de rendimiento.
+struct Ps2Stats
+{
+	u32 frames;
+	u32 triangles;
+	u32 skippedOffscreen;
+	u32 pageUploads;
+	u32 clutUploads;
+	u32 page16Uploads;
+	u32 surfaceBinds;
+	u32 queueFlushes;
+};
+global_variable struct Ps2Stats s_stats;
+global_variable clock_t s_statsStart = 0;
 
 global_variable const GrVertex *s_vertices = NULL;
 global_variable int s_vertexCount = 0;
@@ -140,6 +176,10 @@ global_variable int s_offscreen = 0;
 global_variable int s_projectionW = 512;
 global_variable int s_projectionH = 240;
 global_variable int s_trianglesSinceFlush = 0;
+
+// Recorte actual en pixeles del GS (x0, y0, x1, y1 incluidos) o desactivado.
+global_variable int s_scissorOn = 0;
+global_variable int s_scissor[4];
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -187,8 +227,27 @@ internal int Ps2Renderer_RectsOverlap(int ax, int ay, int aw, int ah, int bx, in
 
 internal void Ps2Renderer_FlushQueue(void)
 {
+	s_stats.queueFlushes++;
 	gsKit_queue_exec(s_gs);
 	s_trianglesSinceFlush = 0;
+}
+
+internal u32 Ps2Renderer_UploadBytes(int width, int height, u32 psm)
+{
+	const u32 texels = (u32)width * (u32)height;
+
+	switch (psm)
+	{
+	case GS_PSM_T4:
+		return texels / 2;
+	case GS_PSM_T8:
+		return texels;
+	case GS_PSM_CT16:
+	case GS_PSM_CT16S:
+		return texels * 2;
+	default:
+		return texels * 4;
+	}
 }
 
 // Envia datos de la RAM del EE a la memoria del GS de forma inmediata. Antes se
@@ -198,9 +257,22 @@ internal void Ps2Renderer_SendToGS(void *data, int width, int height, u32 vram, 
 {
 	s_lastBindValid = 0;
 	Ps2Renderer_FlushQueue();
-	FlushCache(0);
+	// Solo hace falta volcar a memoria el trozo de cache de datos que se envia.
+	SyncDCache(data, (u8 *)data + Ps2Renderer_UploadBytes(width, height, psm));
 	gsKit_texture_send((u32 *)data, width, height, vram, psm, tbw, clutMode);
 	dmaKit_wait(DMA_CHANNEL_GIF, 0);
+}
+
+internal void Ps2Renderer_ApplyScissor(void)
+{
+	if (s_scissorOn)
+	{
+		gsKit_set_scissor(s_gs, GS_SETREG_SCISSOR(s_scissor[0], s_scissor[2], s_scissor[1], s_scissor[3]));
+	}
+	else
+	{
+		gsKit_set_scissor(s_gs, GS_SCISSOR_RESET);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +419,17 @@ internal void Ps2Tex_InvalidateRect(int x, int y, int w, int h)
 {
 	s_lastBindValid = 0;
 
+	// Si el juego escribe desde la CPU encima de una zona que tenia el contenido
+	// de un buffer del GS, esa zona ya no corresponde al GS.
+	for (int i = 0; i < PS2_MAX_FB_SURFACES; i++)
+	{
+		struct Ps2FbSurface *surface = &s_fbSurfaces[i];
+		if (surface->valid && Ps2Renderer_RectsOverlap(x, y, w, h, surface->x, surface->y, surface->w, surface->h))
+		{
+			surface->valid = 0;
+		}
+	}
+
 	for (int i = 0; i < s_pageSlotCount; i++)
 	{
 		struct Ps2PageSlot *slot = &s_pageSlots[i];
@@ -419,6 +502,7 @@ internal u32 Ps2Tex_GetPage(s16 page, TexFormat format)
 	}
 
 	Ps2Renderer_SendToGS(s_pageUpload, 256, 256, victim->vram, (format == TF_8_BIT) ? GS_PSM_T8 : GS_PSM_T4, 4, GS_CLUT_TEXTURE);
+	s_stats.pageUploads++;
 
 	victim->page = page;
 	victim->format = (u8)format;
@@ -482,6 +566,7 @@ internal u32 Ps2Tex_GetClut(u16 clut, TexFormat format, u8 profile)
 		Ps2Renderer_SendToGS(s_clutUpload, 8, 2, victim->vram, GS_PSM_CT32, 1, GS_CLUT_PALLETE);
 	}
 
+	s_stats.clutUploads++;
 	victim->clut = clut;
 	victim->format = (u8)format;
 	victim->profile = profile;
@@ -522,11 +607,29 @@ internal u32 Ps2Tex_GetPage16(s16 page, u8 profile)
 	}
 
 	Ps2Renderer_SendToGS(s_page16Upload, 256, 256, s_page16Slot.vram, GS_PSM_CT32, 4, GS_CLUT_NONE);
+	s_stats.page16Uploads++;
 
 	s_page16Slot.page = page;
 	s_page16Slot.profile = profile;
 	s_page16Slot.valid = 1;
 	return s_page16Slot.vram;
+}
+
+internal const struct Ps2FbSurface *Ps2Tex_FindSurface(s16 page)
+{
+	const int pageX = Ps2Tex_PageX(page);
+	const int pageY = Ps2Tex_PageY(page);
+
+	for (int i = 0; i < PS2_MAX_FB_SURFACES; i++)
+	{
+		const struct Ps2FbSurface *surface = &s_fbSurfaces[i];
+		if (surface->valid && Ps2Renderer_RectsOverlap(pageX, pageY, 256, 256, surface->x, surface->y, surface->w, surface->h))
+		{
+			return surface;
+		}
+	}
+
+	return NULL;
 }
 
 internal int Ps2Tex_BindSlow(const GrVertex *v, GSTEXTURE *tex, u8 profile);
@@ -540,6 +643,7 @@ internal int Ps2Tex_Bind(const GrVertex *v, GSTEXTURE *tex)
 	    (s_lastBindProfile == profile))
 	{
 		*tex = s_lastBindTex;
+		s_boundSurface = (const struct Ps2FbSurface *)s_lastBindSurface;
 		return 1;
 	}
 
@@ -553,12 +657,14 @@ internal int Ps2Tex_Bind(const GrVertex *v, GSTEXTURE *tex)
 	s_lastBindFormat = (u8)s_currentTexFormat;
 	s_lastBindProfile = profile;
 	s_lastBindTex = *tex;
+	s_lastBindSurface = s_boundSurface;
 	s_lastBindValid = 1;
 	return 1;
 }
 
 internal int Ps2Tex_BindSlow(const GrVertex *v, GSTEXTURE *tex, u8 profile)
 {
+	s_boundSurface = NULL;
 	memset(tex, 0, sizeof(*tex));
 	tex->Width = 256;
 	tex->Height = 256;
@@ -588,6 +694,20 @@ internal int Ps2Tex_BindSlow(const GrVertex *v, GSTEXTURE *tex, u8 profile)
 
 	if (s_currentTexFormat == TF_16_BIT)
 	{
+		// La textura cae en una zona que el GS ha dibujado: usar su framebuffer.
+		const struct Ps2FbSurface *surface = Ps2Tex_FindSurface(v->page);
+		if (surface != NULL)
+		{
+			tex->Width = s_gs->Width;
+			tex->Height = s_gs->Height;
+			tex->TBW = (u8)(s_gs->Width / 64);
+			tex->PSM = s_gs->PSM;
+			tex->Vram = surface->gsVram;
+			s_boundSurface = surface;
+			s_stats.surfaceBinds++;
+			return 1;
+		}
+
 		const u32 pageVram = Ps2Tex_GetPage16(v->page, profile);
 		if (pageVram == 0)
 		{
@@ -762,11 +882,42 @@ internal void Ps2Renderer_FlipNoWait(void)
 	gsKit_setactive(s_gs);
 }
 
+// Imprime un resumen cada ~2 segundos.
+internal void Ps2Renderer_UpdateStats(void)
+{
+	s_stats.frames++;
+
+	const clock_t now = clock();
+	if (s_statsStart == 0)
+	{
+		s_statsStart = now;
+		return;
+	}
+
+	const double seconds = (double)(now - s_statsStart) / (double)CLOCKS_PER_SEC;
+	if (seconds < 2.0)
+	{
+		return;
+	}
+
+	const u32 frames = (s_stats.frames > 0) ? s_stats.frames : 1;
+	printf("[CTR PS2] perf: %.1f fps | tris/frame %u | uploads/frame: pages %.1f clut %.1f p16 %.1f | fb-tex %u | offscreen tris %u | flushes/frame %.1f\n",
+	       (double)s_stats.frames / seconds, s_stats.triangles / frames,
+	       (double)s_stats.pageUploads / frames, (double)s_stats.clutUploads / frames, (double)s_stats.page16Uploads / frames,
+	       s_stats.surfaceBinds, s_stats.skippedOffscreen, (double)s_stats.queueFlushes / frames);
+
+	memset(&s_stats, 0, sizeof(s_stats));
+	s_statsStart = now;
+}
+
 void NativeRenderer_SwapWindow(void)
 {
 	Ps2Renderer_FlushQueue();
 	gsKit_finish();
 	Ps2Renderer_FlipNoWait();
+	// Por si al cambiar de buffer se restablece el recorte.
+	Ps2Renderer_ApplyScissor();
+	Ps2Renderer_UpdateStats();
 }
 
 // ---------------------------------------------------------------------------
@@ -775,12 +926,54 @@ void NativeRenderer_SwapWindow(void)
 
 void NativeRenderer_StoreFrameBuffer(int x, int y, int w, int h)
 {
-	// Lo que pinta el GS no se copia de vuelta a la VRAM de PS1 (pendiente para
-	// los efectos que leen la pantalla).
-	(void)x;
-	(void)y;
-	(void)w;
-	(void)h;
+	// En PC aqui se copia lo dibujado a la VRAM de PS1. En PS2 basta con apuntar
+	// que esa zona de VRAM esta ahora en el buffer del GS en el que se dibuja;
+	// si el juego la usa luego como textura, se lee directamente del GS.
+	Ps2Renderer_ClampRect(&x, &y, &w, &h);
+	if ((s_gs == NULL) || (w <= 0) || (h <= 0))
+	{
+		return;
+	}
+
+	Ps2Renderer_FlushQueue();
+	s_lastBindValid = 0;
+
+	const u32 drawBuffer = s_gs->ScreenBuffer[s_gs->ActiveBuffer & 1];
+	struct Ps2FbSurface *target = NULL;
+
+	// Reutiliza la entrada de la misma zona o la del mismo buffer del GS.
+	for (int i = 0; i < PS2_MAX_FB_SURFACES; i++)
+	{
+		struct Ps2FbSurface *surface = &s_fbSurfaces[i];
+		if (surface->valid && ((surface->gsVram == drawBuffer) || ((surface->x == x) && (surface->y == y))))
+		{
+			target = surface;
+			break;
+		}
+	}
+
+	if (target == NULL)
+	{
+		target = &s_fbSurfaces[s_fbSurfaceNext];
+		s_fbSurfaceNext = (s_fbSurfaceNext + 1) % PS2_MAX_FB_SURFACES;
+	}
+
+	// Una zona de VRAM solo puede estar en un buffer: quita solapes antiguos.
+	for (int i = 0; i < PS2_MAX_FB_SURFACES; i++)
+	{
+		struct Ps2FbSurface *surface = &s_fbSurfaces[i];
+		if ((surface != target) && surface->valid && Ps2Renderer_RectsOverlap(x, y, w, h, surface->x, surface->y, surface->w, surface->h))
+		{
+			surface->valid = 0;
+		}
+	}
+
+	target->valid = 1;
+	target->x = x;
+	target->y = y;
+	target->w = w;
+	target->h = h;
+	target->gsVram = drawBuffer;
 }
 
 void NativeRenderer_PresentVRAMRect(int x, int y, int w, int h)
@@ -807,8 +1000,9 @@ void NativeRenderer_PresentVRAMRect(int x, int y, int w, int h)
 	s_vramDisplayTexture.Width = w;
 	s_vramDisplayTexture.Height = h;
 	Ps2Renderer_FlushQueue();
-	FlushCache(0);
+	SyncDCache(s_displayUpload, (u8 *)s_displayUpload + (size_t)w * (size_t)h * sizeof(u16));
 	gsKit_texture_upload(s_gs, &s_vramDisplayTexture);
+	gsKit_set_scissor(s_gs, GS_SCISSOR_RESET);
 
 	// Sin blending: es una copia directa de la imagen.
 	s_gs->PrimAlphaEnable = GS_SETTING_OFF;
@@ -818,6 +1012,7 @@ void NativeRenderer_PresentVRAMRect(int x, int y, int w, int h)
 	                          (float)s_gs->Width, (float)s_gs->Height, (float)w, (float)h,
 	                          0, GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
 	Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
+	Ps2Renderer_ApplyScissor();
 	Ps2Renderer_FlushQueue();
 }
 
@@ -838,15 +1033,52 @@ void NativeRenderer_SaveVRAM(const char *outputFileName, int x, int y, int width
 
 void NativeRenderer_Clear(int x, int y, int w, int h, u8 r, u8 g, u8 b)
 {
-	// Limpia la pantalla entera (pendiente: solo el rectangulo, para pantalla partida).
-	(void)x;
-	(void)y;
-	(void)w;
-	(void)h;
+	// Limpia solo la parte del rectangulo que cae en la pantalla mostrada (misma
+	// logica que la version de PC), escalada a la resolucion del GS.
+	int displayX = activeDispEnv.disp.x;
+	int displayY = activeDispEnv.disp.y;
+	int displayW = activeDispEnv.disp.w;
+	int displayH = activeDispEnv.disp.h;
+
+	if ((w <= 0) || (h <= 0))
+	{
+		return;
+	}
+
+	if ((displayW <= 0) || (displayH <= 0))
+	{
+		displayX = activeDrawEnv.clip.x;
+		displayY = activeDrawEnv.clip.y;
+		displayW = activeDrawEnv.clip.w;
+		displayH = activeDrawEnv.clip.h;
+	}
+
+	if ((displayW <= 0) || (displayH <= 0))
+	{
+		return;
+	}
+
+	const int overlapX = (x > displayX) ? x : displayX;
+	const int overlapY = (y > displayY) ? y : displayY;
+	const int overlapRight = ((x + w) < (displayX + displayW)) ? (x + w) : (displayX + displayW);
+	const int overlapBottom = ((y + h) < (displayY + displayH)) ? (y + h) : (displayY + displayH);
+
+	if ((overlapRight <= overlapX) || (overlapBottom <= overlapY))
+	{
+		return;
+	}
+
+	const float scaleX = (float)s_gs->Width / (float)displayW;
+	const float scaleY = (float)s_gs->Height / (float)displayH;
 
 	s_gs->PrimAlphaEnable = GS_SETTING_OFF;
-	gsKit_clear(s_gs, GS_SETREG_RGBAQ(r, g, b, 0x80, 0x00));
+	gsKit_set_scissor(s_gs, GS_SCISSOR_RESET);
+	gsKit_prim_sprite(s_gs,
+	                  (float)(overlapX - displayX) * scaleX, (float)(overlapY - displayY) * scaleY,
+	                  (float)(overlapRight - displayX) * scaleX, (float)(overlapBottom - displayY) * scaleY,
+	                  0, GS_SETREG_RGBAQ(r, g, b, 0x80, 0x00));
 	Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
+	Ps2Renderer_ApplyScissor();
 }
 
 void NativeRenderer_ClearVRAM(int x, int y, int w, int h, u8 r, u8 g, u8 b)
@@ -1001,9 +1233,58 @@ void NativeRenderer_SetProjection(const RECT16 *drawRect, const DISPENV *display
 
 void NativeRenderer_SetupClipMode(const RECT16 *clipRect, const DISPENV *displayEnv, int enable)
 {
-	(void)clipRect;
-	(void)displayEnv;
-	(void)enable;
+	int on = 0;
+	int box[4] = {0, 0, 0, 0};
+
+	if ((s_gs != NULL) && enable && (displayEnv->disp.w > 0) && (displayEnv->disp.h > 0))
+	{
+		if ((clipRect->w <= 0) || (clipRect->h <= 0))
+		{
+			// Area vacia: no se dibuja nada. Un recorte de 1 pixel fuera de pantalla.
+			on = 1;
+			box[0] = box[2] = s_gs->Width + 1;
+			box[1] = box[3] = s_gs->Height + 1;
+		}
+		else
+		{
+			const int relX = clipRect->x - displayEnv->disp.x;
+			const int relY = clipRect->y - displayEnv->disp.y;
+
+			// Solo hace falta recortar si el area no cubre toda la pantalla.
+			if ((relX > 0) || (relY > 0) || (clipRect->w < displayEnv->disp.w) || (clipRect->h < displayEnv->disp.h))
+			{
+				const float scaleX = (float)s_gs->Width / (float)displayEnv->disp.w;
+				const float scaleY = (float)s_gs->Height / (float)displayEnv->disp.h;
+
+				on = 1;
+				box[0] = (int)((float)relX * scaleX);
+				box[1] = (int)((float)relY * scaleY);
+				box[2] = (int)((float)(relX + clipRect->w) * scaleX) - 1;
+				box[3] = (int)((float)(relY + clipRect->h) * scaleY) - 1;
+
+				if (box[0] < 0)
+				{
+					box[0] = 0;
+				}
+				if (box[1] < 0)
+				{
+					box[1] = 0;
+				}
+			}
+		}
+	}
+
+	if ((on == s_scissorOn) && (!on || (memcmp(box, s_scissor, sizeof(box)) == 0)))
+	{
+		return;
+	}
+
+	s_scissorOn = on;
+	memcpy(s_scissor, box, sizeof(box));
+	if (s_gs != NULL)
+	{
+		Ps2Renderer_ApplyScissor();
+	}
 }
 
 void NativeRenderer_SetTexture(TextureID texture, TexFormat texFormat)
@@ -1051,8 +1332,15 @@ internal u64 Ps2Renderer_VertexColor(const GrVertex *v, u8 alpha)
 
 void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 {
-	if ((s_gs == NULL) || (s_vertices == NULL) || s_offscreen)
+	if ((s_gs == NULL) || (s_vertices == NULL))
 	{
+		return;
+	}
+
+	if (s_offscreen)
+	{
+		// Dibujo fuera de pantalla (a otra zona de VRAM): pendiente.
+		s_stats.skippedOffscreen += (u32)triangles;
 		return;
 	}
 
@@ -1082,10 +1370,38 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 				continue;
 			}
 
+			float uv[3][2] = {
+			    {(float)v0->u, (float)v0->v},
+			    {(float)v1->u, (float)v1->v},
+			    {(float)v2->u, (float)v2->v},
+			};
+
+			if (s_boundSurface != NULL)
+			{
+				// Lo dibujado en pantalla no tiene bit STP: en la pasada mezclada de
+				// un semitransparente no se dibuja nada (igual que en PS1).
+				if (s_semiTransPass == 2)
+				{
+					continue;
+				}
+
+				// Coordenadas de VRAM de PS1 -> pixeles del framebuffer del GS.
+				const float surfScaleX = (float)s_gs->Width / (float)s_boundSurface->w;
+				const float surfScaleY = (float)s_gs->Height / (float)s_boundSurface->h;
+				const float baseX = (float)(Ps2Tex_PageX(v0->page) - s_boundSurface->x);
+				const float baseY = (float)(Ps2Tex_PageY(v0->page) - s_boundSurface->y);
+
+				for (int k = 0; k < 3; k++)
+				{
+					uv[k][0] = (baseX + uv[k][0]) * surfScaleX;
+					uv[k][1] = (baseY + uv[k][1]) * surfScaleY;
+				}
+			}
+
 			gsKit_prim_triangle_goraud_texture_3d(s_gs, &tex,
-			                                      v0->x * scaleX, v0->y * scaleY, 0, (float)v0->u, (float)v0->v,
-			                                      v1->x * scaleX, v1->y * scaleY, 0, (float)v1->u, (float)v1->v,
-			                                      v2->x * scaleX, v2->y * scaleY, 0, (float)v2->u, (float)v2->v,
+			                                      v0->x * scaleX, v0->y * scaleY, 0, uv[0][0], uv[0][1],
+			                                      v1->x * scaleX, v1->y * scaleY, 0, uv[1][0], uv[1][1],
+			                                      v2->x * scaleX, v2->y * scaleY, 0, uv[2][0], uv[2][1],
 			                                      Ps2Renderer_VertexColor(v0, 0x80),
 			                                      Ps2Renderer_VertexColor(v1, 0x80),
 			                                      Ps2Renderer_VertexColor(v2, 0x80));
@@ -1101,6 +1417,8 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 			                               Ps2Renderer_VertexColor(v1, s_modeAlpha),
 			                               Ps2Renderer_VertexColor(v2, s_modeAlpha));
 		}
+
+		s_stats.triangles++;
 
 		if (++s_trianglesSinceFlush >= PS2_TRIANGLES_PER_FLUSH)
 		{
