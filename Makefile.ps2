@@ -10,7 +10,10 @@ EE_OBJS = main_ps2.o
 
 EE_INCS = -I. -Iinclude -Iplatform/ps2/include -I$(GSKIT)/include
 
-EE_CFLAGS = -std=gnu17 -DCTR_NATIVE -DCTR_PS2 \
+# -fno-strict-aliasing: el codigo descompilado lee datos con tipos distintos a
+# los que se escribieron (p. ej. gte_ldv0 lee un SVECTOR de s16 como u32). Sin
+# esta opcion GCC -O2 puede reordenar esas lecturas antes de las escrituras.
+EE_CFLAGS = -std=gnu17 -DCTR_NATIVE -DCTR_PS2 -fno-strict-aliasing \
 	-Wno-error=incompatible-pointer-types \
 	-Wno-error=int-conversion \
 	-Wno-error=implicit-function-declaration
