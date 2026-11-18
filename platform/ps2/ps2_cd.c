@@ -6,6 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <libcdvd.h>
+#include <time.h>
 
 static int s_ps2CdInitDone = 0;
 
@@ -127,7 +128,48 @@ int Ps2Cd_SearchFile(const char *name, unsigned int *lsnOut, unsigned int *sizeO
 }
 
 // Reads 'count' 2048-byte sectors starting at 'lsn' into buf (64-byte aligned).
+// Diagnostico: se registran las primeras lecturas y un resumen periodico.
+#define PS2_CD_LOG_FIRST_READS 120
+static unsigned int s_ps2CdReadCount = 0;
+static unsigned int s_ps2CdStatReads = 0;
+static unsigned int s_ps2CdStatSectors = 0;
+static double s_ps2CdStatMs = 0.0;
+static unsigned int s_ps2CdLastEnd = 0;
+static unsigned int s_ps2CdStatSeeks = 0;
+
+static int Ps2Cd_ReadSectorsRaw(unsigned int lsn, unsigned int count, void *buf);
+
 int Ps2Cd_ReadSectors(unsigned int lsn, unsigned int count, void *buf)
+{
+	const clock_t t0 = clock();
+	const int ok = Ps2Cd_ReadSectorsRaw(lsn, count, buf);
+	const double ms = (double)(clock() - t0) * 1000.0 / (double)CLOCKS_PER_SEC;
+
+	const int seek = (lsn != s_ps2CdLastEnd);
+	s_ps2CdLastEnd = lsn + count;
+	s_ps2CdReadCount++;
+	s_ps2CdStatReads++;
+	s_ps2CdStatSectors += count;
+	s_ps2CdStatMs += ms;
+	s_ps2CdStatSeeks += seek ? 1u : 0u;
+
+	if (s_ps2CdReadCount <= PS2_CD_LOG_FIRST_READS)
+	{
+		printf("[CTR PS2] cd read #%u lsn %u count %u %s %.1f ms\n", s_ps2CdReadCount, lsn, count, seek ? "SEEK" : "seq", ms);
+	}
+	if (s_ps2CdStatReads >= 50)
+	{
+		printf("[CTR PS2] cd: %u reads (%u seeks), %u KB, %.0f ms total, %.1f ms/read\n", s_ps2CdStatReads, s_ps2CdStatSeeks, s_ps2CdStatSectors * 2u,
+		       s_ps2CdStatMs, s_ps2CdStatMs / (double)s_ps2CdStatReads);
+		s_ps2CdStatReads = 0;
+		s_ps2CdStatSectors = 0;
+		s_ps2CdStatMs = 0.0;
+		s_ps2CdStatSeeks = 0;
+	}
+	return ok;
+}
+
+static int Ps2Cd_ReadSectorsRaw(unsigned int lsn, unsigned int count, void *buf)
 {
 	sceCdRMode mode;
 	mode.trycount = 5;
