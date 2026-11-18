@@ -149,6 +149,18 @@ global_variable struct Ps2FbSurface s_fbSurfaces[PS2_MAX_FB_SURFACES];
 global_variable int s_fbSurfaceNext = 0;
 global_variable const struct Ps2FbSurface *s_boundSurface = NULL;
 
+// Lectura del framebuffer del GS a RAM (para StoreImage/MoveImage de la pantalla).
+global_variable u16 s_readbackPixels[640 * 512] __attribute__((aligned(64)));
+global_variable u16 s_readTemp[VRAM_WIDTH * VRAM_HEIGHT] __attribute__((aligned(64)));
+global_variable u64 s_readbackPacket[10] __attribute__((aligned(64)));
+global_variable u32 s_drawGeneration = 1;
+global_variable u32 s_readbackGeneration = 0;
+global_variable u32 s_readbackVram = 0xffffffffu;
+global_variable int s_readbackOk = 0;
+
+internal const struct Ps2FbSurface *Ps2Renderer_FindSurfaceRect(int x, int y, int w, int h);
+internal void Ps2Renderer_ReadRect(u16 *dst, int dstStride, int x, int y, int w, int h);
+
 // Estadisticas para el medidor de rendimiento.
 struct Ps2Stats
 {
@@ -160,6 +172,7 @@ struct Ps2Stats
 	u32 page16Uploads;
 	u32 surfaceBinds;
 	u32 queueFlushes;
+	u32 readbacks;
 };
 global_variable struct Ps2Stats s_stats;
 global_variable clock_t s_statsStart = 0;
@@ -901,10 +914,10 @@ internal void Ps2Renderer_UpdateStats(void)
 	}
 
 	const u32 frames = (s_stats.frames > 0) ? s_stats.frames : 1;
-	printf("[CTR PS2] perf: %.1f fps | tris/frame %u | uploads/frame: pages %.1f clut %.1f p16 %.1f | fb-tex %u | offscreen tris %u | flushes/frame %.1f\n",
+	printf("[CTR PS2] perf: %.1f fps | tris/frame %u | uploads/frame: pages %.1f clut %.1f p16 %.1f | fb-tex %u | offscreen tris %u | flushes/frame %.1f | readbacks %u\n",
 	       (double)s_stats.frames / seconds, s_stats.triangles / frames,
 	       (double)s_stats.pageUploads / frames, (double)s_stats.clutUploads / frames, (double)s_stats.page16Uploads / frames,
-	       s_stats.surfaceBinds, s_stats.skippedOffscreen, (double)s_stats.queueFlushes / frames);
+	       s_stats.surfaceBinds, s_stats.skippedOffscreen, (double)s_stats.queueFlushes / frames, s_stats.readbacks);
 
 	memset(&s_stats, 0, sizeof(s_stats));
 	s_statsStart = now;
@@ -914,6 +927,7 @@ void NativeRenderer_SwapWindow(void)
 {
 	Ps2Renderer_FlushQueue();
 	gsKit_finish();
+	s_drawGeneration++;
 	Ps2Renderer_FlipNoWait();
 	// Por si al cambiar de buffer se restablece el recorte.
 	Ps2Renderer_ApplyScissor();
@@ -1071,6 +1085,7 @@ void NativeRenderer_Clear(int x, int y, int w, int h, u8 r, u8 g, u8 b)
 	const float scaleX = (float)s_gs->Width / (float)displayW;
 	const float scaleY = (float)s_gs->Height / (float)displayH;
 
+	s_drawGeneration++;
 	s_gs->PrimAlphaEnable = GS_SETTING_OFF;
 	gsKit_set_scissor(s_gs, GS_SCISSOR_RESET);
 	gsKit_prim_sprite(s_gs,
@@ -1103,7 +1118,15 @@ void NativeRenderer_CopyVRAM(u16 *src, int x, int y, int w, int h, int dstX, int
 {
 	int stride = w;
 
-	if (src == NULL)
+	if ((src == NULL) && (w > 0) && (h > 0) && (w <= VRAM_WIDTH) && (h <= VRAM_HEIGHT) && (Ps2Renderer_FindSurfaceRect(x, y, w, h) != NULL))
+	{
+		// MoveImage desde una zona dibujada por el GS: leerla primero del GS.
+		Ps2Renderer_ReadRect(s_readTemp, w, x, y, w, h);
+		src = s_readTemp;
+		x = 0;
+		y = 0;
+	}
+	else if (src == NULL)
 	{
 		src = s_vramPixels;
 		stride = VRAM_WIDTH;
@@ -1137,8 +1160,175 @@ void NativeRenderer_CopyVRAM(u16 *src, int x, int y, int w, int h, int dstX, int
 	Ps2Tex_InvalidateRect(dstX, dstY, w, h);
 }
 
+// --- Lectura GS -> RAM -------------------------------------------------------
+// Secuencia estandar del hardware: se pide al GS una transferencia
+// local -> host (TRXDIR = 1) por el canal GIF y los datos se recogen por la
+// FIFO de VIF1 con el DMA 1 en direccion hacia memoria.
+
+#define PS2_D1_CHCR   ((volatile u32 *)0x10009000)
+#define PS2_D1_MADR   ((volatile u32 *)0x10009010)
+#define PS2_D1_QWC    ((volatile u32 *)0x10009020)
+#define PS2_D2_CHCR   ((volatile u32 *)0x1000A000)
+#define PS2_D2_MADR   ((volatile u32 *)0x1000A010)
+#define PS2_D2_QWC    ((volatile u32 *)0x1000A020)
+#define PS2_VIF1_STAT ((volatile u32 *)0x10003C00)
+#define PS2_GS_BUSDIR ((volatile u64 *)0x12001040)
+
+#define PS2_DMA_STR          (1u << 8)
+#define PS2_VIF1_STAT_FDR    (1u << 23)
+#define PS2_READBACK_TIMEOUT 20000000
+
+internal int Ps2Renderer_WaitDma(volatile u32 *chcr)
+{
+	for (int i = 0; i < PS2_READBACK_TIMEOUT; i++)
+	{
+		if ((*chcr & PS2_DMA_STR) == 0)
+		{
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+internal u32 Ps2Renderer_PhysAddr(const void *ptr)
+{
+	return (u32)(uintptr_t)ptr & 0x0fffffffu;
+}
+
+// Lee el buffer del GS que empieza en gsVram (Width x Height, PSM del framebuffer).
+internal int Ps2Renderer_ReadbackGS(u32 gsVram)
+{
+	const u32 width = (u32)s_gs->Width;
+	const u32 height = (u32)s_gs->Height;
+	const u32 bytes = width * height * 2u;
+	const u32 qwc = bytes / 16u;
+
+	if ((s_readbackVram == gsVram) && (s_readbackGeneration == s_drawGeneration))
+	{
+		return s_readbackOk;
+	}
+
+	// Que el GS termine todo lo pendiente antes de leer.
+	Ps2Renderer_FlushQueue();
+	gsKit_finish();
+	dmaKit_wait(DMA_CHANNEL_GIF, 0);
+
+	// GIFtag: 4 registros en modo A+D, fin de paquete.
+	s_readbackPacket[0] = 4ull | (1ull << 15) | (1ull << 60);
+	s_readbackPacket[1] = 0x0eull;
+	// BITBLTBUF: origen = buffer del GS.
+	s_readbackPacket[2] = (u64)(gsVram / 256u) | ((u64)(width / 64u) << 16) | ((u64)s_gs->PSM << 24);
+	s_readbackPacket[3] = 0x50;
+	// TRXPOS: desde (0,0).
+	s_readbackPacket[4] = 0;
+	s_readbackPacket[5] = 0x51;
+	// TRXREG: tamano.
+	s_readbackPacket[6] = (u64)width | ((u64)height << 32);
+	s_readbackPacket[7] = 0x52;
+	// TRXDIR: local -> host.
+	s_readbackPacket[8] = 1;
+	s_readbackPacket[9] = 0x53;
+
+	SyncDCache(s_readbackPacket, (u8 *)s_readbackPacket + sizeof(s_readbackPacket));
+
+	int ok = Ps2Renderer_WaitDma(PS2_D2_CHCR);
+	if (ok)
+	{
+		*PS2_D2_MADR = Ps2Renderer_PhysAddr(s_readbackPacket);
+		*PS2_D2_QWC = sizeof(s_readbackPacket) / 16u;
+		*PS2_D2_CHCR = PS2_DMA_STR | 1u; // DIR = desde memoria
+		ok = Ps2Renderer_WaitDma(PS2_D2_CHCR);
+	}
+
+	if (ok)
+	{
+		InvalidDCache(s_readbackPixels, (u8 *)s_readbackPixels + bytes);
+
+		*PS2_VIF1_STAT = PS2_VIF1_STAT_FDR;
+		*PS2_GS_BUSDIR = 1;
+
+		*PS2_D1_MADR = Ps2Renderer_PhysAddr(s_readbackPixels);
+		*PS2_D1_QWC = qwc;
+		*PS2_D1_CHCR = PS2_DMA_STR; // DIR = hacia memoria
+		ok = Ps2Renderer_WaitDma(PS2_D1_CHCR);
+
+		*PS2_VIF1_STAT = 0;
+		*PS2_GS_BUSDIR = 0;
+
+		InvalidDCache(s_readbackPixels, (u8 *)s_readbackPixels + bytes);
+	}
+
+	if (!ok)
+	{
+		printf("[CTR PS2] GS readback timed out\n");
+	}
+
+	s_stats.readbacks++;
+	s_readbackVram = gsVram;
+	s_readbackGeneration = s_drawGeneration;
+	s_readbackOk = ok;
+	return ok;
+}
+
+internal const struct Ps2FbSurface *Ps2Renderer_FindSurfaceRect(int x, int y, int w, int h)
+{
+	for (int i = 0; i < PS2_MAX_FB_SURFACES; i++)
+	{
+		const struct Ps2FbSurface *surface = &s_fbSurfaces[i];
+		if (surface->valid && Ps2Renderer_RectsOverlap(x, y, w, h, surface->x, surface->y, surface->w, surface->h))
+		{
+			return surface;
+		}
+	}
+
+	return NULL;
+}
+
+// Copia un rectangulo de "VRAM de PS1" a dst. Lo que caiga en una zona que el GS
+// ha dibujado se lee del GS (escalado a la resolucion de PS1); el resto, de la
+// copia en RAM.
+internal void Ps2Renderer_ReadRect(u16 *dst, int dstStride, int x, int y, int w, int h)
+{
+	const struct Ps2FbSurface *surface = Ps2Renderer_FindSurfaceRect(x, y, w, h);
+	const int haveGs = (surface != NULL) && Ps2Renderer_ReadbackGS(surface->gsVram);
+
+	for (int row = 0; row < h; row++)
+	{
+		const int vy = y + row;
+		u16 *out = &dst[row * dstStride];
+
+		for (int col = 0; col < w; col++)
+		{
+			const int vx = x + col;
+
+			if (haveGs && (vx >= surface->x) && (vx < surface->x + surface->w) && (vy >= surface->y) && (vy < surface->y + surface->h))
+			{
+				const int gx = ((vx - surface->x) * s_gs->Width) / surface->w;
+				const int gy = ((vy - surface->y) * s_gs->Height) / surface->h;
+				// Lo dibujado en PS1 no lleva bit STP.
+				out[col] = (u16)(s_readbackPixels[gy * s_gs->Width + gx] & 0x7fff);
+			}
+			else if ((vx >= 0) && (vx < VRAM_WIDTH) && (vy >= 0) && (vy < VRAM_HEIGHT))
+			{
+				out[col] = s_vramPixels[vy * VRAM_WIDTH + vx];
+			}
+			else
+			{
+				out[col] = 0;
+			}
+		}
+	}
+}
+
 void NativeRenderer_ReadVRAM(u16 *dst, int x, int y, int dstW, int dstH)
 {
+	if (Ps2Renderer_FindSurfaceRect(x, y, dstW, dstH) != NULL)
+	{
+		Ps2Renderer_ReadRect(dst, dstW, x, y, dstW, dstH);
+		return;
+	}
+
 	const u16 *src = s_vramPixels + x + VRAM_WIDTH * y;
 
 	for (int row = 0; row < dstH; row++)
@@ -1336,6 +1526,8 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 	{
 		return;
 	}
+
+	s_drawGeneration++;
 
 	if (s_offscreen)
 	{
