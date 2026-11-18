@@ -277,9 +277,76 @@ void Platform_EndScene(void)
 	NativeRenderer_SwapWindow();
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostico de visibilidad (temporal): cada ~60 frames imprime que decide el
+// juego sobre que partes del nivel se ven. Sirve para comparar la intro de la
+// carrera (donde solo sale el cielo) con la carrera normal.
+// ---------------------------------------------------------------------------
+
+global_variable int s_visDiagFrame = 0;
+
+internal int Ps2Diag_CountBits(const int *words, int bitCount)
+{
+	int total = 0;
+
+	if (words == NULL)
+	{
+		return -1;
+	}
+
+	for (int i = 0; i < (bitCount + 31) / 32; i++)
+	{
+		u32 w = (u32)words[i];
+		while (w != 0)
+		{
+			w &= w - 1;
+			total++;
+		}
+	}
+
+	return total;
+}
+
+internal void Ps2Diag_PrintVisibility(void)
+{
+	struct GameTracker *gGT = sdata->gGT;
+
+	if (gGT == NULL)
+	{
+		return;
+	}
+
+	struct CameraDC *cam = &gGT->cameraDC[0];
+	struct PushBuffer *pb = &gGT->pushBuffer[0];
+	struct Driver *driver = gGT->drivers[0];
+	struct mesh_info *mesh = (gGT->level1 != NULL) ? gGT->level1->ptr_mesh_info : NULL;
+	int leafBits = -1;
+	int leafTotal = 0;
+	int *leafSrc = NULL;
+
+	if ((gGT->visMem1 != NULL) && (mesh != NULL))
+	{
+		leafTotal = mesh->numBspNodes;
+		leafBits = Ps2Diag_CountBits(gGT->visMem1->visLeafList[0], leafTotal);
+		leafSrc = gGT->visMem1->visLeafSrc[0];
+	}
+
+	printf("[CTR PS2] vis: level %d mode1 %08x render %08x | cam mode %d hit %d quad %p camLeafSrc %p | drv under %p | visLeafSrc %p visible leaves %d/%d drawn %d | "
+	       "pos %d,%d,%d dist %d\n",
+	       gGT->levelID, (unsigned)gGT->gameMode1, (unsigned)gGT->renderFlags, cam->cameraMode, (int)cam->quadBlockSearchHit, (void *)cam->ptrQuadBlock,
+	       (void *)cam->visLeafSrc, (driver != NULL) ? (void *)driver->underDriver : NULL, (void *)leafSrc, leafBits, leafTotal, gGT->bspLeafsDrawn,
+	       pb->pos.x, pb->pos.y, pb->pos.z, pb->distanceToScreen_PREV);
+}
+
 void Platform_EndFrame(void)
 {
 	Platform_EndScene();
+
+	if (++s_visDiagFrame >= 60)
+	{
+		s_visDiagFrame = 0;
+		Ps2Diag_PrintVisibility();
+	}
 }
 
 void Platform_PresentVRAMDisplay(void)
