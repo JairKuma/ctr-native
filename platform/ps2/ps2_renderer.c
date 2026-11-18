@@ -180,6 +180,14 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 		return 0;
 	}
 
+	// CTR NTSC-U espera 60 Hz. Con una BIOS PAL gsKit elegiria 50 Hz y el juego
+	// iria un 17% mas lento, asi que forzamos NTSC 640x448 entrelazado.
+	s_gs->Mode = GS_MODE_NTSC;
+	s_gs->Interlace = GS_INTERLACED;
+	s_gs->Field = GS_FIELD;
+	s_gs->Width = 640;
+	s_gs->Height = 448;
+
 	s_gs->PSM = GS_PSM_CT24;
 	s_gs->PSMZ = GS_PSMZ_16S;
 	s_gs->ZBuffering = GS_SETTING_OFF;
