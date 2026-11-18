@@ -6,7 +6,7 @@
 # Genera ctr_ps2.elf. El build de PC (CMake) no se ve afectado.
 
 EE_BIN = ctr_ps2.elf
-EE_OBJS = main_ps2.o
+EE_OBJS = main_ps2.o audsrv_irx.o
 
 EE_INCS = -I. -Iinclude -Iplatform/ps2/include -I$(GSKIT)/include
 
@@ -19,12 +19,16 @@ EE_CFLAGS = -std=gnu17 -DCTR_NATIVE -DCTR_PS2 -fno-strict-aliasing \
 	-Wno-error=implicit-function-declaration
 
 EE_LDFLAGS = -L$(GSKIT)/lib
-EE_LIBS = -lgskit -ldmakit -lpad -lm
+EE_LIBS = -lgskit -ldmakit -lpad -laudsrv -lpatches -lm
 
 all: $(EE_BIN)
 
+# Modulo de audio del IOP incrustado en el ELF.
+audsrv_irx.c: $(PS2SDK)/iop/irx/audsrv.irx
+	$(PS2SDK)/bin/bin2c $< $@ audsrv_irx
+
 clean:
-	rm -f $(EE_BIN) $(EE_OBJS)
+	rm -f $(EE_BIN) $(EE_OBJS) audsrv_irx.c
 
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal

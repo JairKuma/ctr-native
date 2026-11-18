@@ -15,6 +15,7 @@
 
 #include <kernel.h>
 #include <loadfile.h>
+#include <sbv_patches.h>
 #include <sifrpc.h>
 
 #define _EnterCriticalSection(x)
@@ -64,9 +65,13 @@
 #include "platform/native_state.c"
 #include "platform/native_str.c"
 
-// Modulos especificos de PS2 (sustituyen a native_audio.c, native_input.c,
-// native_platform.c, native_renderer.c y native_glad.c).
-#include "platform/ps2/ps2_audio.c"
+// Audio: el mismo native_audio.c de PC (emulador de la SPU de PS1 + XA). Su
+// salida SDL la cubre platform/ps2/include/SDL3/SDL.h sobre ps2_audio_out.c.
+#include "platform/native_audio.c"
+
+// Modulos especificos de PS2 (sustituyen a native_input.c, native_platform.c,
+// native_renderer.c y native_glad.c, y dan la salida de audio).
+#include "platform/ps2/ps2_audio_out.c"
 #include "platform/ps2/ps2_input.c"
 #include "platform/ps2/ps2_platform.c"
 #include "platform/ps2/ps2_renderer.c"
@@ -80,16 +85,28 @@
 // Partidas guardadas en la memory card de PS2 (ranura 1).
 #define PS2_MEMCARD_ROOT "mc0:/CTRNATIVE"
 
-// Carga los modulos del IOP que hacen falta para la memory card y los mandos. Los de rom0: vienen en la BIOS de cualquier PS2.
+// audsrv.irx va incrustado en el ELF (Makefile.ps2 lo genera con bin2c).
+extern unsigned char audsrv_irx[];
+extern unsigned int size_audsrv_irx;
+
+// Carga los modulos del IOP: memory card, mandos y audio. Los de rom0: vienen
+// en la BIOS de cualquier PS2; audsrv.irx (del PS2SDK) va dentro del ELF.
 static void Ps2Main_LoadIopModules(void)
 {
-	static const char *const modules[] = {"rom0:SIO2MAN", "rom0:MCMAN", "rom0:MCSERV", "rom0:PADMAN"};
+	static const char *const modules[] = {"rom0:SIO2MAN", "rom0:MCMAN", "rom0:MCSERV", "rom0:PADMAN", "rom0:LIBSD"};
 
 	for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]); i++)
 	{
 		const int id = SifLoadModule(modules[i], 0, NULL);
 		printf("[CTR PS2] Load %s: %s (%d)\n", modules[i], (id >= 0) ? "ok" : "FAILED", id);
 	}
+
+	// Permite cargar modulos desde la RAM del EE en BIOS antiguas.
+	sbv_patch_enable_lmb();
+
+	int moduleResult = 0;
+	const int audsrvId = SifExecModuleBuffer(audsrv_irx, size_audsrv_irx, 0, NULL, &moduleResult);
+	printf("[CTR PS2] Load audsrv.irx: %s (%d, %d)\n", (audsrvId >= 0) ? "ok" : "FAILED", audsrvId, moduleResult);
 }
 
 // Comprueba si existe <dir>/assets/ctr-u.bin o <dir>/assets/BIGFILE.BIG.
@@ -178,6 +195,7 @@ int main(int argc, char *argv[])
 {
 	SifInitRpc(0);
 	Ps2Main_LoadIopModules();
+	Ps2AudioOut_Init();
 
 	printf("[CTR PS2] CTR Native %s starting...\n", CTR_NATIVE_VERSION);
 
