@@ -513,11 +513,13 @@ internal void Ps2AudioOut_Report(void)
 	{
 		const unsigned long long mixFrames = (g_ps2ProfMixFrames > 0) ? g_ps2ProfMixFrames : 1ull;
 		const unsigned long long voicesX10 = (g_ps2ProfVoiceSamples * 10ull) / mixFrames;
-		printf("[CTR PS2] audio cpu: voces %u%% | xa %u%% | eco %u%% | voces sonando %u.%u | saltado %u vblanks\n",
-		       Ps2Prof_Percent(g_ps2ProfVoiceCycles, total), Ps2Prof_Percent(g_ps2ProfXaCycles, total), Ps2Prof_Percent(g_ps2ProfReverbCycles, total),
+		printf("[CTR PS2] audio cpu: voces %u%% | xa %u%% (+ disco xa %u%%) | eco %u%% | voces sonando %u.%u | saltado %u vblanks\n",
+		       Ps2Prof_Percent(g_ps2ProfVoiceCycles, total), Ps2Prof_Percent(g_ps2ProfXaCycles, total), Ps2Prof_Percent(g_ps2ProfXaCdCycles, total),
+		       Ps2Prof_Percent(g_ps2ProfReverbCycles, total),
 		       (unsigned)(voicesX10 / 10ull), (unsigned)(voicesX10 % 10ull), (unsigned)s_ps2AudioBudgetSkippedVBlanks);
 		g_ps2ProfVoiceCycles = 0;
 		g_ps2ProfXaCycles = 0;
+		g_ps2ProfXaCdCycles = 0;
 		g_ps2ProfReverbCycles = 0;
 		g_ps2ProfVoiceSamples = 0;
 		g_ps2ProfMixFrames = 0;
