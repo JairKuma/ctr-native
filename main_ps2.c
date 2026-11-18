@@ -232,7 +232,10 @@ static const char *Ps2Main_FindBaseDir(int argc, char *argv[])
 		// Todo sale de CTR_U.BIN. La base solo sirve para buscar assets
 		// extraidos sueltos (mods), que en un disco nunca estan; cada busqueda
 		// fallida en el disco es lenta (busqueda en el lector). rom0: responde
-		// al instante que no existen.
+		// al instante que no existen. Ademas activamos el modo "solo disco":
+		// no se busca ningun fichero suelto, todo va directo a CTR_U.BIN.
+		g_ps2AssetsDiscOnly = 1;
+		printf("[CTR PS2] Disc-only mode: loose asset probes disabled\n");
 		return "rom0:";
 	}
 
