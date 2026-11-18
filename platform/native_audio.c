@@ -949,6 +949,43 @@ internal int NativeAudio_GetXAPseudo37800SampleNoLock(int channel, s64 pseudoFra
 
 internal int NativeAudio_ZigZagInterpolateXASampleNoLock(int channel)
 {
+#if defined(CTR_PS2)
+	// NOTE: PS2 build fast path, same result as the generic loop below. Use
+	// 32-bit group/phase math (no libgcc 64-bit divide) and, when all 29 taps
+	// are already decoded and inside the ring, read them directly instead of
+	// going through two range-checked calls per tap.
+	if ((s_audio.xa.sampleRate == XA_SAMPLE_RATE_37800) && (s_audio.xa.outputFrame <= 0xffffffffull) && (s_audio.xaStream.sectors != NULL))
+	{
+		struct NativeAudioXaStream *xs = &s_audio.xaStream;
+		const u32 outputFrame32 = (u32)s_audio.xa.outputFrame;
+		const u32 group32 = outputFrame32 / NATIVE_AUDIO_XA_ZIGZAG_PHASES;
+		const int phase32 = (int)(outputFrame32 - (group32 * NATIVE_AUDIO_XA_ZIGZAG_PHASES));
+		const s64 newest = (s64)(group32 + 1u) * NATIVE_AUDIO_XA_ZIGZAG_INPUTS - 1;
+		const s64 oldest = newest - (NATIVE_AUDIO_XA_ZIGZAG_TAPS - 1);
+
+		if ((oldest >= 0) && (newest < (s64)s_audio.xa.frameCount))
+		{
+			while (((u64)newest >= xs->decodedFrames) && NativeAudio_XaStreamDecodeNextSectorNoLock())
+			{
+			}
+
+			if (((u64)newest < xs->decodedFrames) && ((xs->decodedFrames - (u64)oldest) <= NATIVE_AUDIO_XA_RING_FRAMES))
+			{
+				int fastSum = 0;
+				u32 frameIndex = (u32)newest;
+
+				for (int tap = 0; tap < NATIVE_AUDIO_XA_ZIGZAG_TAPS; tap++, frameIndex--)
+				{
+					const int sample = xs->ring[(frameIndex & (NATIVE_AUDIO_XA_RING_FRAMES - 1)) * NATIVE_AUDIO_CHANNELS + (u32)channel];
+					fastSum += (sample * s_xaZigZagTable[tap][phase32]) >> 15;
+				}
+
+				return NativeAudio_Clamp16(fastSum);
+			}
+		}
+	}
+#endif
+
 	u64 group = s_audio.xa.outputFrame / NATIVE_AUDIO_XA_ZIGZAG_PHASES;
 	int phase = (int)(s_audio.xa.outputFrame % NATIVE_AUDIO_XA_ZIGZAG_PHASES);
 	u64 p = (group + 1) * NATIVE_AUDIO_XA_ZIGZAG_INPUTS;
@@ -1247,8 +1284,20 @@ internal int NativeAudio_ApplyAdsrEnvelope(int sample, int adsrLevel)
 		return sample;
 	}
 
+#if defined(CTR_PS2)
+	// NOTE: PS2 build. The R5900 has no 64-bit divide, so (s64)/variable
+	// becomes a slow libgcc call per voice per sample. |sample| <= 0x8000 and
+	// |adsrLevel| <= 0x8000 here, so the product fits in 32 bits; dividing by
+	// each constant separately gives the exact same truncated result.
+	if (adsrLevel < 0)
+	{
+		return NativeAudio_Clamp16((sample * adsrLevel) / 0x8000);
+	}
+	return NativeAudio_Clamp16((sample * adsrLevel) / NATIVE_AUDIO_ADSR_MAX);
+#else
 	int scaleMax = adsrLevel < 0 ? 0x8000 : NATIVE_AUDIO_ADSR_MAX;
 	return NativeAudio_Clamp16((int)(((s64)sample * adsrLevel) / scaleMax));
+#endif
 }
 
 internal void NativeAudio_UpdatePackedAdsrFromFields(struct NativeAudioVoice *voice)
