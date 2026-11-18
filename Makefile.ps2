@@ -1,0 +1,27 @@
+# CTR Native - build para PS2 (PS2SDK + gsKit).
+#
+# Uso (dentro de la imagen Docker ps2dev/ps2dev o con PS2SDK instalado):
+#   make -f Makefile.ps2
+#
+# Genera ctr_ps2.elf. El build de PC (CMake) no se ve afectado.
+
+EE_BIN = ctr_ps2.elf
+EE_OBJS = main_ps2.o
+
+EE_INCS = -I. -Iinclude -Iplatform/ps2/include -I$(GSKIT)/include
+
+EE_CFLAGS = -std=gnu17 -DCTR_NATIVE -DCTR_PS2 \
+	-Wno-error=incompatible-pointer-types \
+	-Wno-error=int-conversion \
+	-Wno-error=implicit-function-declaration
+
+EE_LDFLAGS = -L$(GSKIT)/lib
+EE_LIBS = -lgskit -ldmakit -lm
+
+all: $(EE_BIN)
+
+clean:
+	rm -f $(EE_BIN) $(EE_OBJS)
+
+include $(PS2SDK)/samples/Makefile.pref
+include $(PS2SDK)/samples/Makefile.eeglobal
