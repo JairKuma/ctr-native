@@ -19,7 +19,7 @@ EE_CFLAGS = -std=gnu17 -DCTR_NATIVE -DCTR_PS2 -fno-strict-aliasing \
 	-Wno-error=implicit-function-declaration
 
 EE_LDFLAGS = -L$(GSKIT)/lib
-EE_LIBS = -lgskit -ldmakit -lpad -laudsrv -lpatches -lm
+EE_LIBS = -lgskit -ldmakit -lpad -lcdvd -laudsrv -lpatches -lm
 
 all: $(EE_BIN)
 
