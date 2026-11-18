@@ -54,25 +54,32 @@ internal int NativeDiscImage_FindHostImagePath(char *dst, size_t dstSize, Native
 	}
 
 	DIR *dir = opendir(dirPath);
-	if (dir == NULL)
+	if (dir != NULL)
 	{
-		return 0;
-	}
-
-	while ((entry = readdir(dir)) != NULL)
-	{
-		NativeStr8 entryName = NativeStr8_FromCString(entry->d_name);
-
-		if (!NativeStr8_EqualsIgnoreCaseAscii(entryName, NATIVE_STR8_LIT(NATIVE_DISC_IMAGE_BIN_PATH)))
+		while ((entry = readdir(dir)) != NULL)
 		{
-			continue;
+			NativeStr8 entryName = NativeStr8_FromCString(entry->d_name);
+
+			if (!NativeStr8_EqualsIgnoreCaseAscii(entryName, NATIVE_STR8_LIT(NATIVE_DISC_IMAGE_BIN_PATH)))
+			{
+				continue;
+			}
+
+			found = NativePath_Join(dst, dstSize, NativeStr8_FromCString(dirPath), entryName);
+			break;
 		}
 
-		found = NativePath_Join(dst, dstSize, NativeStr8_FromCString(dirPath), entryName);
-		break;
+		closedir(dir);
 	}
 
-	closedir(dir);
+	// NOTE: Some file systems can open files but cannot list directories
+	// (e.g. PCSX2's host: device). Fall back to the exact file name, like the
+	// Windows path above; NativeDiscImage_Init() fails cleanly if fopen() does.
+	if (!found)
+	{
+		found = NativePath_Join(dst, dstSize, NativeStr8_FromCString(dirPath), NATIVE_STR8_LIT(NATIVE_DISC_IMAGE_BIN_PATH));
+	}
+
 	return found;
 #endif
 }
