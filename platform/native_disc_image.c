@@ -107,6 +107,58 @@ internal int NativeDiscImage_CheckRawSectorHeader(const u8 *sector)
 	return 1;
 }
 
+#if defined(CTR_PS2)
+// NOTE: PS2 build only. Each fseek/fread on the PS2 (PCSX2 host:, USB, CD) is
+// an IOP round trip, and XA preparation / level loads read one sector at a
+// time. Read a run of consecutive sectors at once and serve the following
+// requests from memory.
+#define NATIVE_DISC_IMAGE_CACHE_SECTORS 64u
+static u8 s_nativeDiscImageCache[NATIVE_DISC_IMAGE_CACHE_SECTORS * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE] __attribute__((aligned(64)));
+static u32 s_nativeDiscImageCacheStart = 0;
+static u32 s_nativeDiscImageCacheCount = 0;
+
+internal void NativeDiscImage_InvalidateCache(void)
+{
+	s_nativeDiscImageCacheStart = 0;
+	s_nativeDiscImageCacheCount = 0;
+}
+
+internal int NativeDiscImage_ReadRawSector(u32 lba, u8 *sector)
+{
+	if (s_nativeDiscImageFile == NULL)
+	{
+		return 0;
+	}
+
+	if ((s_nativeDiscImageCacheCount == 0) || (lba < s_nativeDiscImageCacheStart) || (lba >= s_nativeDiscImageCacheStart + s_nativeDiscImageCacheCount))
+	{
+		u64 offset = (u64)lba * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE;
+		if ((offset > (u64)LONG_MAX) || (fseek(s_nativeDiscImageFile, (long)offset, SEEK_SET) != 0))
+		{
+			NativeDiscImage_InvalidateCache();
+			return 0;
+		}
+
+		const size_t bytesRead = fread(s_nativeDiscImageCache, 1, sizeof(s_nativeDiscImageCache), s_nativeDiscImageFile);
+		const u32 sectorsRead = (u32)(bytesRead / NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE);
+		if (sectorsRead == 0)
+		{
+			NativeDiscImage_InvalidateCache();
+			return 0;
+		}
+
+		s_nativeDiscImageCacheStart = lba;
+		s_nativeDiscImageCacheCount = sectorsRead;
+	}
+
+	memcpy(sector, &s_nativeDiscImageCache[(lba - s_nativeDiscImageCacheStart) * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE], NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE);
+	return NativeDiscImage_CheckRawSectorHeader(sector);
+}
+#else
+internal void NativeDiscImage_InvalidateCache(void)
+{
+}
+
 internal int NativeDiscImage_ReadRawSector(u32 lba, u8 *sector)
 {
 	if (s_nativeDiscImageFile == NULL)
@@ -127,6 +179,8 @@ internal int NativeDiscImage_ReadRawSector(u32 lba, u8 *sector)
 
 	return NativeDiscImage_CheckRawSectorHeader(sector);
 }
+
+#endif
 
 internal int NativeDiscImage_ReadDataSector(u32 lba, u8 *payload)
 {
@@ -374,6 +428,7 @@ int NativeDiscImage_Init(const char *assetsDir)
 		return 0;
 	}
 
+	NativeDiscImage_InvalidateCache();
 	s_nativeDiscImageFile = fopen(path, "rb");
 	if (s_nativeDiscImageFile == NULL)
 	{
