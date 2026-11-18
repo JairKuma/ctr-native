@@ -93,7 +93,11 @@ internal s32 NativeCD_OpenFile(const char *filename, s32 *outSize)
 	NativeStr8 rootless = NativeCD_PathAfterRoot(NativeStr8_FromCString(normalized));
 
 	FILE *file = NativeAssets_OpenHostStr8(rootless, "rb");
-	if ((file == NULL) && NativeStr8_CopyToCString(rootlessPath, sizeof(rootlessPath), rootless))
+	if ((file == NULL)
+#if defined(CTR_PS2)
+	    && !g_ps2AssetsDiscOnly
+#endif
+	    && NativeStr8_CopyToCString(rootlessPath, sizeof(rootlessPath), rootless))
 	{
 		file = fopen(rootlessPath, "rb");
 	}

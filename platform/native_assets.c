@@ -46,6 +46,12 @@ global_variable int s_nativeAssetIndexCount;
 global_variable int s_nativeAssetIndexCapacity;
 global_variable int s_nativeAssetIndexBuilt;
 
+#if defined(CTR_PS2)
+// PS2: when booting from disc, every loose-file probe is a slow EE->IOP round
+// trip that always fails. Set by main_ps2.c once CTR_U.BIN is found.
+int g_ps2AssetsDiscOnly = 0;
+#endif
+
 internal int NativeAssets_FileExistsHost(const char *path)
 {
 	if (path == NULL)
@@ -583,6 +589,13 @@ int NativeAssets_ResolvePathStr8(NativeStr8 relativePath, char *dst, size_t dstS
 {
 	char path[NATIVE_ASSETS_PATH_MAX];
 
+#if defined(CTR_PS2)
+	if (g_ps2AssetsDiscOnly)
+	{
+		return 0;
+	}
+#endif
+
 	if (!NativeAssets_BuildPathStr8(relativePath, path, sizeof(path)))
 	{
 		return 0;
@@ -611,6 +624,13 @@ int NativeAssets_ResolvePath(const char *relativePath, char *dst, size_t dstSize
 FILE *NativeAssets_OpenHostStr8(NativeStr8 relativePath, const char *mode)
 {
 	char path[NATIVE_ASSETS_PATH_MAX];
+
+#if defined(CTR_PS2)
+	if (g_ps2AssetsDiscOnly)
+	{
+		return NULL;
+	}
+#endif
 
 	if ((mode == NULL) || !NativeAssets_BuildPathStr8(relativePath, path, sizeof(path)))
 	{
