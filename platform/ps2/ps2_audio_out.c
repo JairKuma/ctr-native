@@ -4,7 +4,7 @@
 // XA por software y entrega PCM de 16 bits estereo a 44100 Hz. Aqui se envia
 // ese PCM al modulo audsrv del IOP, que lo reproduce por la SPU2.
 //
-// Como funciona (no hay hilo de audio):
+// Como funciona:
 //  1. GENERAR: se genera el audio de cada VBlank de HARDWARE que pasa (44100 /
 //     59,94 = 735,7 muestras), tambien durante las cargas (desde la espera del
 //     lector, ps2_cd.c). Asi el audio y la musica XA avanzan con el reloj real,
@@ -33,23 +33,54 @@
 // Tamano del buffer de audsrv (ringbuf del IOP). Se ajusta con lo que informe
 // audsrv_available() con la cola vacia.
 #define PS2_AUDIO_RING_BYTES_DEFAULT 20480
-// FIFO propio en la EE: ~370 ms. Si se llena, se descarta lo mas antiguo.
-#define PS2_AUDIO_FIFO_FRAMES 16384u
+// FIFO propio en la EE: ~740 ms (cabe una rafaga de 24 VBlanks de golpe). Si
+// se llena, se descarta lo nuevo.
+#define PS2_AUDIO_FIFO_FRAMES 32768u
+// Retraso maximo del sonido (FIFO + audsrv, en frames). Si se pasa (porque se
+// mando silencio mientras el juego estaba parado), se tira lo mas antiguo del
+// FIFO hasta quedar en PS2_AUDIO_TARGET_LATENCY_FRAMES. Sin esto el retraso
+// crecia sin parar hasta llenar el FIFO ("dropped" y musica entrecortada).
+#define PS2_AUDIO_MAX_LATENCY_FRAMES    (735u * 16u) // ~267 ms
+#define PS2_AUDIO_TARGET_LATENCY_FRAMES (735u * 10u) // ~167 ms
 // Si en audsrv queda menos que esto y el FIFO esta vacio, se manda silencio.
 #define PS2_AUDIO_LOW_BYTES (735 * 2 * PS2_AUDIO_FRAME_BYTES)
 #define PS2_AUDIO_SILENCE_FRAMES 735
-// Cada cuantos VBlanks se informa por consola (~5 s).
+// Cada cuantos VBlanks de hardware se informa por consola (~5 s).
 #define PS2_AUDIO_REPORT_VBLANKS 300
+
+// --- Medidor de CPU -----------------------------------------------------------
+// Se cuentan ciclos de la EE (registro Count del COP0, 294,912 MHz) gastados en
+// cada cosa. ps2_cd.c (objeto aparte) y ps2_platform.c / ps2_renderer.c suman
+// aqui. Cada ~5 s se imprime el reparto en "[CTR PS2] cpu: ...".
+#define PS2_EE_CYCLES_PER_VBLANK 4920120ull // 294912000 / 59,94
+unsigned long long g_ps2ProfAudioCycles = 0; // generar el sonido (emulacion SPU + XA)
+unsigned long long g_ps2ProfCdCycles = 0;    // esperando al lector de disco
+unsigned long long g_ps2ProfIdleCycles = 0;  // esperando el VBlank (tiempo libre)
+unsigned long long g_ps2ProfGsCycles = 0;    // enviando/esperando al GS al final del frame
+
+static inline u32 Ps2Prof_Now(void)
+{
+	u32 count;
+	__asm__ volatile("mfc0 %0, $9" : "=r"(count));
+	return count;
+}
 
 global_variable int s_ps2AudioReady = 0; // audsrv inicializado
 global_variable int s_ps2AudioOpen = 0;  // formato configurado
 global_variable u32 s_ps2AudioBytesSent = 0;
 global_variable u32 s_ps2AudioRateAcc = 0;
 global_variable int s_ps2AudioRingBytes = PS2_AUDIO_RING_BYTES_DEFAULT;
-global_variable u32 s_ps2AudioReportCounter = 0;
 global_variable u32 s_ps2AudioSilenceFrames = 0;
 global_variable u32 s_ps2AudioDroppedFrames = 0;
 global_variable int s_ps2AudioInPump = 0;
+global_variable u32 s_ps2AudioTrimmedFrames = 0;
+// Lo que queda en audsrv (bytes), segun la ultima vez que miro el hilo de entrega.
+global_variable volatile u32 s_ps2AudioQueuedEstimate = 0;
+// Peticiones de recorte: el hilo principal sube "requested", el de entrega
+// recorta y sube "done". Cada contador lo escribe un solo hilo.
+global_variable volatile u32 s_ps2AudioTrimRequested = 0;
+global_variable volatile u32 s_ps2AudioTrimDone = 0;
+global_variable volatile u32 s_ps2AudioTrimFrames = 0;
 
 global_variable s16 s_ps2AudioFifo[PS2_AUDIO_FIFO_FRAMES * 2] __attribute__((aligned(64)));
 // FIFO de un productor (hilo principal, escribe) y un consumidor (hilo de
@@ -190,6 +221,20 @@ internal void Ps2AudioOut_Flush(void)
 	}
 	available &= ~(PS2_AUDIO_FRAME_BYTES - 1);
 
+	// Recorte pedido por el hilo principal: tirar lo mas antiguo del FIFO.
+	if (s_ps2AudioTrimRequested != s_ps2AudioTrimDone)
+	{
+		u32 trim = s_ps2AudioTrimFrames;
+		const u32 inFifo = s_ps2AudioFifoWrite - s_ps2AudioFifoRead;
+		if (trim > inFifo)
+		{
+			trim = inFifo;
+		}
+		s_ps2AudioFifoRead += trim;
+		s_ps2AudioTrimmedFrames += trim;
+		s_ps2AudioTrimDone = s_ps2AudioTrimRequested;
+	}
+
 	u32 fifoFrames = s_ps2AudioFifoWrite - s_ps2AudioFifoRead;
 	u32 frames = (u32)available / PS2_AUDIO_FRAME_BYTES;
 	if (frames > fifoFrames)
@@ -220,7 +265,11 @@ internal void Ps2AudioOut_Flush(void)
 	{
 		Ps2AudioOut_SendToAudsrv(s_ps2AudioSilence, (int)sizeof(s_ps2AudioSilence));
 		s_ps2AudioSilenceFrames += PS2_AUDIO_SILENCE_FRAMES;
+		available -= (int)sizeof(s_ps2AudioSilence);
 	}
+
+	const int queuedNow = s_ps2AudioRingBytes - available;
+	s_ps2AudioQueuedEstimate = (queuedNow > 0) ? (u32)queuedNow : 0u;
 
 }
 
@@ -322,6 +371,8 @@ internal void Ps2AudioOut_Service(void)
 
 	// Generar audio puede leer del disco (musica XA), y la lectura del disco
 	// llama a Ps2AudioOut_PumpIdle(): no volver a entrar.
+	const u32 profStart = Ps2Prof_Now();
+	const unsigned long long profCdStart = g_ps2ProfCdCycles;
 	s_ps2AudioInPump = 1;
 	while (s_ps2AudioGenVBlank != hw)
 	{
@@ -337,6 +388,21 @@ internal void Ps2AudioOut_Service(void)
 	}
 	s_ps2AudioInPump = 0;
 	s_ps2AudioLastServiceVBlank = hw;
+	// Tiempo de generar, sin contar lo que se espero al disco (eso va a "cd").
+	g_ps2ProfAudioCycles += (unsigned long long)(u32)(Ps2Prof_Now() - profStart) - (g_ps2ProfCdCycles - profCdStart);
+
+	// Aqui el audio generado llega justo hasta "ahora", asi que lo que hay en
+	// la cola (FIFO + audsrv) es el retraso del sonido. Si es demasiado, pedir
+	// al hilo de entrega que tire lo mas antiguo.
+	if (s_ps2AudioTrimRequested == s_ps2AudioTrimDone)
+	{
+		const u32 pipeline = (s_ps2AudioFifoWrite - s_ps2AudioFifoRead) + (s_ps2AudioQueuedEstimate / PS2_AUDIO_FRAME_BYTES);
+		if (pipeline > PS2_AUDIO_MAX_LATENCY_FRAMES)
+		{
+			s_ps2AudioTrimFrames = pipeline - PS2_AUDIO_TARGET_LATENCY_FRAMES;
+			s_ps2AudioTrimRequested = s_ps2AudioTrimDone + 1;
+		}
+	}
 }
 
 // Llamado mientras se espera al lector de disco (ver ps2_cd.c): genera el audio
@@ -350,6 +416,60 @@ void Ps2AudioOut_PumpIdle(void)
 	Ps2AudioOut_Service();
 }
 
+global_variable u32 s_ps2AudioReportVBlank = 0;
+global_variable int s_ps2AudioReportStarted = 0;
+
+internal u32 Ps2Prof_Percent(unsigned long long cycles, unsigned long long total)
+{
+	if (total == 0)
+	{
+		return 0;
+	}
+	unsigned long long pct = (cycles * 100ull + total / 2ull) / total;
+	return (pct > 999ull) ? 999u : (u32)pct;
+}
+
+// Cada ~5 s (segun el reloj real): estado del sonido y reparto de la CPU.
+internal void Ps2AudioOut_Report(void)
+{
+	const u32 hw = Ps2_GetHwVBlankCount();
+	if (!s_ps2AudioReportStarted)
+	{
+		s_ps2AudioReportStarted = 1;
+		s_ps2AudioReportVBlank = hw;
+		g_ps2ProfAudioCycles = 0;
+		g_ps2ProfCdCycles = 0;
+		g_ps2ProfIdleCycles = 0;
+		g_ps2ProfGsCycles = 0;
+		return;
+	}
+
+	const u32 elapsed = hw - s_ps2AudioReportVBlank;
+	if (elapsed < PS2_AUDIO_REPORT_VBLANKS)
+	{
+		return;
+	}
+	s_ps2AudioReportVBlank = hw;
+
+	printf("[CTR PS2] audio: sent %u KB | fifo %u frames | silence %u | dropped %u | trimmed %u\n", (unsigned)(s_ps2AudioBytesSent / 1024u),
+	       (unsigned)(s_ps2AudioFifoWrite - s_ps2AudioFifoRead), (unsigned)s_ps2AudioSilenceFrames, (unsigned)s_ps2AudioDroppedFrames,
+	       (unsigned)s_ps2AudioTrimmedFrames);
+	s_ps2AudioSilenceFrames = 0;
+	s_ps2AudioDroppedFrames = 0;
+	s_ps2AudioTrimmedFrames = 0;
+
+	const unsigned long long total = (unsigned long long)elapsed * PS2_EE_CYCLES_PER_VBLANK;
+	const unsigned long long known = g_ps2ProfAudioCycles + g_ps2ProfCdCycles + g_ps2ProfIdleCycles + g_ps2ProfGsCycles;
+	const unsigned long long rest = (known < total) ? (total - known) : 0ull;
+	printf("[CTR PS2] cpu: audio %u%% | cd %u%% | gs %u%% | libre %u%% | juego %u%%\n", Ps2Prof_Percent(g_ps2ProfAudioCycles, total),
+	       Ps2Prof_Percent(g_ps2ProfCdCycles, total), Ps2Prof_Percent(g_ps2ProfGsCycles, total), Ps2Prof_Percent(g_ps2ProfIdleCycles, total),
+	       Ps2Prof_Percent(rest, total));
+	g_ps2ProfAudioCycles = 0;
+	g_ps2ProfCdCycles = 0;
+	g_ps2ProfIdleCycles = 0;
+	g_ps2ProfGsCycles = 0;
+}
+
 // Llamado en cada VBlank que recibe el juego (ps2_platform.c).
 void Ps2AudioOut_Pump(void)
 {
@@ -358,13 +478,5 @@ void Ps2AudioOut_Pump(void)
 		return; // ya atendido en este VBlank
 	}
 	Ps2AudioOut_Service();
-
-	if (++s_ps2AudioReportCounter >= PS2_AUDIO_REPORT_VBLANKS)
-	{
-		s_ps2AudioReportCounter = 0;
-		printf("[CTR PS2] audio: sent %u KB | fifo %u frames | silence %u | dropped %u\n", (unsigned)(s_ps2AudioBytesSent / 1024u),
-		       (unsigned)(s_ps2AudioFifoWrite - s_ps2AudioFifoRead), (unsigned)s_ps2AudioSilenceFrames, (unsigned)s_ps2AudioDroppedFrames);
-		s_ps2AudioSilenceFrames = 0;
-		s_ps2AudioDroppedFrames = 0;
-	}
+	Ps2AudioOut_Report();
 }

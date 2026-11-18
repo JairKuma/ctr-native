@@ -136,9 +136,14 @@ internal int Ps2_CatchUpDueVBlanks(void)
 
 internal void Ps2_WaitAndEmitVBlank(void)
 {
-	while (s_hwVBlankCount == s_consumedVBlankCount)
+	if (s_hwVBlankCount == s_consumedVBlankCount)
 	{
-		// Espera activa: el juego original tambien bloquea aqui.
+		const u32 idleStart = Ps2Prof_Now();
+		while (s_hwVBlankCount == s_consumedVBlankCount)
+		{
+			// Espera activa: el juego original tambien bloquea aqui.
+		}
+		g_ps2ProfIdleCycles += (u32)(Ps2Prof_Now() - idleStart);
 	}
 
 	s_consumedVBlankCount++;

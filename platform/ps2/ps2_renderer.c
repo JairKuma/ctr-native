@@ -966,8 +966,10 @@ void Ps2Renderer_DebugScreen(u8 r, u8 g, u8 b)
 
 void NativeRenderer_SwapWindow(void)
 {
+	const u32 gsStart = Ps2Prof_Now();
 	Ps2Renderer_FlushQueue();
 	gsKit_finish();
+	g_ps2ProfGsCycles += (u32)(Ps2Prof_Now() - gsStart);
 	s_drawGeneration++;
 	Ps2Renderer_FlipNoWait();
 	// Por si al cambiar de buffer se restablece el recorte.

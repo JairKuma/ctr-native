@@ -13,6 +13,17 @@ static int s_ps2CdInitDone = 0;
 // Vive en ps2_audio_out.c (build unity): rellena el audio mientras el lector
 // trabaja, para que una carga larga no deje sin datos a audsrv.
 void Ps2AudioOut_PumpIdle(void);
+// Medidor de CPU (ps2_audio_out.c): tiempo esperando al lector y tiempo de
+// generar sonido (para descontarlo de la espera).
+extern unsigned long long g_ps2ProfCdCycles;
+extern unsigned long long g_ps2ProfAudioCycles;
+
+static inline unsigned int Ps2Cd_ProfNow(void)
+{
+	unsigned int count;
+	__asm__ volatile("mfc0 %0, $9" : "=r"(count));
+	return count;
+}
 static unsigned char s_ps2CdDirBuf[2048] __attribute__((aligned(64)));
 
 int Ps2Cd_ReadSectors(unsigned int lsn, unsigned int count, void *buf);
@@ -169,7 +180,20 @@ int Ps2Cd_ReadSectors(unsigned int lsn, unsigned int count, void *buf)
 	return ok;
 }
 
+static int Ps2Cd_ReadSectorsRawImpl(unsigned int lsn, unsigned int count, void *buf);
+
 static int Ps2Cd_ReadSectorsRaw(unsigned int lsn, unsigned int count, void *buf)
+{
+	const unsigned int start = Ps2Cd_ProfNow();
+	const unsigned long long audioStart = g_ps2ProfAudioCycles;
+	const int ok = Ps2Cd_ReadSectorsRawImpl(lsn, count, buf);
+	const unsigned long long spent = (unsigned long long)(unsigned int)(Ps2Cd_ProfNow() - start);
+	const unsigned long long audio = g_ps2ProfAudioCycles - audioStart;
+	g_ps2ProfCdCycles += (spent > audio) ? (spent - audio) : 0ull;
+	return ok;
+}
+
+static int Ps2Cd_ReadSectorsRawImpl(unsigned int lsn, unsigned int count, void *buf)
 {
 	sceCdRMode mode;
 	mode.trycount = 5;
