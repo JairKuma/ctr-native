@@ -3026,6 +3026,28 @@ int NativeAudio_RestoreState(const void *src, int srcSize)
 	return 1;
 }
 
+#if defined(CTR_PS2)
+// NOTE: PS2 build. Desglose del coste del sonido para el medidor de CPU
+// (ps2_audio_out.c lo imprime): ciclos de la EE en musica XA, voces y eco.
+unsigned long long g_ps2ProfXaCycles = 0;
+unsigned long long g_ps2ProfVoiceCycles = 0;
+unsigned long long g_ps2ProfReverbCycles = 0;
+unsigned long long g_ps2ProfVoiceSamples = 0; // voces sonando x muestras
+unsigned long long g_ps2ProfMixFrames = 0;
+
+static inline u32 NativeAudio_Ps2Now(void)
+{
+	u32 count;
+	__asm__ volatile("mfc0 %0, $9" : "=r"(count));
+	return count;
+}
+#define PS2_AUDIO_PROF_MARK(var) const u32 var = NativeAudio_Ps2Now()
+#define PS2_AUDIO_PROF_ADD(total, from, to) (total) += (u32)((to) - (from))
+#else
+#define PS2_AUDIO_PROF_MARK(var)
+#define PS2_AUDIO_PROF_ADD(total, from, to)
+#endif
+
 internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 {
 	int mixLeft = 0;
@@ -3036,6 +3058,7 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 	int reverbWetRight = 0;
 	int i;
 
+	PS2_AUDIO_PROF_MARK(profT0);
 	if (s_audio.xa.active && (s_audio.xaStream.sectors != NULL))
 	{
 		u64 outputFrameCount = NativeAudio_GetXAOutputFrameCount(s_audio.xa.frameCount, s_audio.xa.sampleRate);
@@ -3065,6 +3088,7 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 		}
 	}
 
+	PS2_AUDIO_PROF_MARK(profT1);
 	if (!s_audio.muted)
 	{
 		for (i = 0; i < NATIVE_AUDIO_SPU_VOICE_COUNT; i++)
@@ -3082,6 +3106,9 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 				continue;
 			}
 
+#if defined(CTR_PS2)
+			g_ps2ProfVoiceSamples++;
+#endif
 			int sample = NativeAudio_InterpolateVoiceSample(voice);
 			sample = NativeAudio_ApplyAdsrEnvelope(sample, voice->adsrLevel);
 			int left = NativeAudio_ApplyVolume(sample, voice->attr.volume.left, s_audio.masterVolumeLeft);
@@ -3115,12 +3142,20 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 		}
 	}
 
+	PS2_AUDIO_PROF_MARK(profT2);
 	NativeAudio_ReverbProcessNoLock(reverbSendLeft, reverbSendRight, &reverbWetLeft, &reverbWetRight);
 	NativeAudio_MixSample(&mixLeft, &mixRight, NativeAudio_ApplyMasterVolume(reverbWetLeft, s_audio.masterVolumeLeft),
 	                      NativeAudio_ApplyMasterVolume(reverbWetRight, s_audio.masterVolumeRight));
 
 	*outLeft = (s16)NativeAudio_Clamp16(mixLeft);
 	*outRight = (s16)NativeAudio_Clamp16(mixRight);
+#if defined(CTR_PS2)
+	PS2_AUDIO_PROF_MARK(profT3);
+	PS2_AUDIO_PROF_ADD(g_ps2ProfXaCycles, profT0, profT1);
+	PS2_AUDIO_PROF_ADD(g_ps2ProfVoiceCycles, profT1, profT2);
+	PS2_AUDIO_PROF_ADD(g_ps2ProfReverbCycles, profT2, profT3);
+	g_ps2ProfMixFrames++;
+#endif
 }
 
 internal int NativeAudio_RenderFramesNoLock(s16 *out, int frameCount)
