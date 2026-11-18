@@ -5,11 +5,10 @@
 // ese PCM al modulo audsrv del IOP, que lo reproduce por la SPU2.
 //
 // Como funciona (no hay hilo de audio):
-//  1. GENERAR: en cada VBlank que recibe el juego, Ps2AudioOut_Pump() genera
-//     exactamente el audio de ese VBlank (44100 / 59,94 = 735,7 muestras). El
-//     audio (y la musica XA) avanza asi al ritmo del juego, que lo necesita:
-//     algunas pantallas (p. ej. la bandera de carga) esperan a que avance la XA.
-//     Se generan TODOS los VBlanks, aunque el fotograma vaya lento.
+//  1. GENERAR: se genera el audio de cada VBlank de HARDWARE que pasa (44100 /
+//     59,94 = 735,7 muestras), tambien durante las cargas (desde la espera del
+//     lector, ps2_cd.c). Asi el audio y la musica XA avanzan con el reloj real,
+//     como en una PS1, aunque el juego vaya lento.
 //  2. GUARDAR: lo generado va a un FIFO propio en la EE (s_ps2AudioFifo).
 //  3. ENTREGAR: del FIFO a audsrv solo lo que cabe (audsrv_available), asi la
 //     EE nunca se queda bloqueada esperando a audsrv.
@@ -216,20 +215,18 @@ internal void Ps2AudioOut_Flush(void)
 	s_ps2AudioLastFlushVBlank = Ps2_GetHwVBlankCount();
 }
 
-// Llamado mientras se espera al lector de disco (ver ps2_cd.c). Solo entrega
-// audio ya generado (no genera), y como mucho una vez por VBlank para no saturar
-// el IOP con llamadas mientras lee el disco.
-void Ps2AudioOut_PumpIdle(void)
-{
-	if (s_ps2AudioInPump || (Ps2_GetHwVBlankCount() == s_ps2AudioLastFlushVBlank))
-	{
-		return;
-	}
-	Ps2AudioOut_Flush();
-}
+// Audio generado hasta este VBlank de hardware.
+global_variable u32 s_ps2AudioGenVBlank = 0;
+global_variable int s_ps2AudioGenStarted = 0;
+// Colchon inicial: se empieza 4 VBlanks "por detras" (~67 ms en audsrv).
+#define PS2_AUDIO_START_LEAD_VBLANKS 4
+// Si se va mas atrasado que esto (parada muy larga), se salta lo antiguo.
+#define PS2_AUDIO_MAX_BEHIND_VBLANKS 24
 
-// Llamado en cada VBlank que recibe el juego (ps2_platform.c).
-void Ps2AudioOut_Pump(void)
+// Genera el audio de los VBlanks de hardware que han pasado y lo entrega.
+// El audio avanza con el reloj real, como la SPU y el lector de una PS1, aunque
+// el juego este cargando o vaya lento.
+internal void Ps2AudioOut_Service(void)
 {
 	SDL_AudioStream *stream = &s_ps2SdlAudioStream;
 
@@ -238,24 +235,56 @@ void Ps2AudioOut_Pump(void)
 		return;
 	}
 
+	const u32 hw = Ps2_GetHwVBlankCount();
+	if (!s_ps2AudioGenStarted)
+	{
+		s_ps2AudioGenStarted = 1;
+		s_ps2AudioGenVBlank = hw - PS2_AUDIO_START_LEAD_VBLANKS;
+	}
+	if (hw - s_ps2AudioGenVBlank > PS2_AUDIO_MAX_BEHIND_VBLANKS)
+	{
+		s_ps2AudioGenVBlank = hw - PS2_AUDIO_MAX_BEHIND_VBLANKS;
+	}
+
 	// Generar audio puede leer del disco (musica XA), y la lectura del disco
 	// llama a Ps2AudioOut_PumpIdle(): no volver a entrar.
 	s_ps2AudioInPump = 1;
-
-	// Audio de este VBlank, arrastrando la parte fraccionaria.
-	s_ps2AudioRateAcc += PS2_AUDIO_RATE_NUM;
-	const int frames = (int)(s_ps2AudioRateAcc / PS2_AUDIO_RATE_DEN);
-	s_ps2AudioRateAcc %= PS2_AUDIO_RATE_DEN;
-
-	if (frames > 0)
+	while (s_ps2AudioGenVBlank != hw)
 	{
-		const int bytes = frames * PS2_AUDIO_FRAME_BYTES;
-		stream->callback(stream->userdata, stream, bytes, bytes);
+		s_ps2AudioGenVBlank++;
+		s_ps2AudioRateAcc += PS2_AUDIO_RATE_NUM;
+		const int frames = (int)(s_ps2AudioRateAcc / PS2_AUDIO_RATE_DEN);
+		s_ps2AudioRateAcc %= PS2_AUDIO_RATE_DEN;
+		if (frames > 0)
+		{
+			const int bytes = frames * PS2_AUDIO_FRAME_BYTES;
+			stream->callback(stream->userdata, stream, bytes, bytes);
+		}
 	}
-
 	s_ps2AudioInPump = 0;
 
 	Ps2AudioOut_Flush();
+}
+
+// Llamado mientras se espera al lector de disco (ver ps2_cd.c): como mucho una
+// vez por VBlank, para no saturar el IOP con llamadas mientras lee.
+void Ps2AudioOut_PumpIdle(void)
+{
+	if (s_ps2AudioInPump || (Ps2_GetHwVBlankCount() == s_ps2AudioLastFlushVBlank))
+	{
+		return;
+	}
+	Ps2AudioOut_Service();
+}
+
+// Llamado en cada VBlank que recibe el juego (ps2_platform.c).
+void Ps2AudioOut_Pump(void)
+{
+	if (Ps2_GetHwVBlankCount() == s_ps2AudioLastFlushVBlank)
+	{
+		return; // ya atendido en este VBlank
+	}
+	Ps2AudioOut_Service();
 
 	if (++s_ps2AudioReportCounter >= PS2_AUDIO_REPORT_VBLANKS)
 	{

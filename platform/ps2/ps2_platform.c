@@ -27,7 +27,9 @@ void NativeRCnt_EmitVBlank(void);
 // las referencian.
 int g_dbg_polygonSelected = 0;
 
-#define PS2_VSYNC_CATCHUP_MAX 8
+// Si un fotograma tarda mucho (carga), se entregan al juego todos los VBlanks
+// pasados (hasta 1 s) para que su reloj no se pare, como en la PS1.
+#define PS2_VSYNC_CATCHUP_MAX 60
 
 global_variable int s_platformInitialized = 0;
 global_variable int s_platformBeginScene = 0;
@@ -97,8 +99,8 @@ internal void Ps2_EmitVBlank(void)
 	}
 
 	NativeAudio_StepVBlank();
-	// Rellena la cola de audsrv hasta su nivel objetivo (solo genera lo que
-	// falta, asi que varios VBlanks seguidos no generan audio de mas).
+	// Audio: avanza con el reloj real (VBlanks de hardware), no con los del
+	// juego; si no hay nada pendiente no hace nada.
 	Ps2AudioOut_Pump();
 	s_nativeVBlankCount++;
 }
@@ -109,15 +111,18 @@ internal int Ps2_CatchUpDueVBlanks(void)
 {
 	int emitted = 0;
 
-	u32 pending = s_hwVBlankCount - s_consumedVBlankCount;
+	// Foto del contador: los VBlanks que lleguen mientras se entregan estos se
+	// entregan en la siguiente llamada (si no, el bucle podria no acabar nunca).
+	const u32 target = s_hwVBlankCount;
+	u32 pending = target - s_consumedVBlankCount;
 
 	if (pending > PS2_VSYNC_CATCHUP_MAX)
 	{
-		s_consumedVBlankCount = s_hwVBlankCount;
-		return 0;
+		// Solo se descarta lo que pase de 1 s.
+		s_consumedVBlankCount = target - PS2_VSYNC_CATCHUP_MAX;
 	}
 
-	while (s_consumedVBlankCount != s_hwVBlankCount)
+	while (s_consumedVBlankCount != target)
 	{
 		s_consumedVBlankCount++;
 		Ps2_EmitVBlank();
