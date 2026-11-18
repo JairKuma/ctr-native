@@ -6,21 +6,31 @@
 // 48000 Hz internamente).
 //
 // No hay hilo de audio: en cada VBlank el bucle principal llama a
-// Ps2AudioOut_Pump(), que pide a native_audio.c (por su callback de SDL) las
-// muestras que falten para mantener unos pocos fotogramas en cola.
+// Ps2AudioOut_Pump(), que pide a native_audio.c (por su callback de SDL)
+// exactamente el audio que corresponde a ese VBlank (44100 Hz / 59,94 Hz NTSC).
+// Asi el audio (y la musica XA, que avanza al generar muestras) va al ritmo de
+// la pantalla sin depender de lo que informe audsrv sobre su cola.
 
 #include <audsrv.h>
 
 #include <stdio.h>
 #include <string.h>
 
-// Cuanto audio se intenta mantener en cola: ~3 VBlanks (~50 ms).
-#define PS2_AUDIO_TARGET_FRAMES ((44100 / 60) * 3)
-#define PS2_AUDIO_FRAME_BYTES   4 // 16 bits x 2 canales
+#define PS2_AUDIO_FRAME_BYTES 4 // 16 bits x 2 canales
+// Muestras por VBlank NTSC: 44100 / (60000 / 1001) = 735,735...
+#define PS2_AUDIO_RATE_NUM   (44100u * 1001u)
+#define PS2_AUDIO_RATE_DEN   60000u
+// Colchon inicial para que la SPU2 no se quede sin datos: ~3 VBlanks.
+#define PS2_AUDIO_PRIME_FRAMES (735 * 3)
+// Cada cuantos VBlanks se informa por consola (~5 s).
+#define PS2_AUDIO_REPORT_VBLANKS 300
 
 global_variable int s_ps2AudioReady = 0;  // audsrv inicializado
 global_variable int s_ps2AudioOpen = 0;   // formato configurado
 global_variable u32 s_ps2AudioBytesSent = 0;
+global_variable u32 s_ps2AudioRateAcc = 0;
+global_variable int s_ps2AudioPrimed = 0;
+global_variable u32 s_ps2AudioReportCounter = 0;
 
 int Ps2AudioOut_Init(void)
 {
@@ -113,18 +123,26 @@ void Ps2AudioOut_Pump(void)
 		return;
 	}
 
-	const int targetBytes = PS2_AUDIO_TARGET_FRAMES * PS2_AUDIO_FRAME_BYTES;
-	const int queuedBytes = Ps2AudioOut_QueuedBytes();
+	// Muestras de este VBlank, arrastrando la parte fraccionaria.
+	s_ps2AudioRateAcc += PS2_AUDIO_RATE_NUM;
+	int frames = (int)(s_ps2AudioRateAcc / PS2_AUDIO_RATE_DEN);
+	s_ps2AudioRateAcc %= PS2_AUDIO_RATE_DEN;
 
-	if (queuedBytes >= targetBytes)
+	if (!s_ps2AudioPrimed)
 	{
-		return;
+		s_ps2AudioPrimed = 1;
+		frames += PS2_AUDIO_PRIME_FRAMES;
 	}
 
-	int needed = targetBytes - queuedBytes;
-	needed -= needed % PS2_AUDIO_FRAME_BYTES;
-	if (needed > 0)
+	const int bytes = frames * PS2_AUDIO_FRAME_BYTES;
+	if (bytes > 0)
 	{
-		stream->callback(stream->userdata, stream, needed, needed);
+		stream->callback(stream->userdata, stream, bytes, bytes);
+	}
+
+	if (++s_ps2AudioReportCounter >= PS2_AUDIO_REPORT_VBLANKS)
+	{
+		s_ps2AudioReportCounter = 0;
+		printf("[CTR PS2] audio: sent %u KB total | audsrv_queued %d\n", (unsigned)(s_ps2AudioBytesSent / 1024u), audsrv_queued());
 	}
 }
