@@ -6,7 +6,7 @@
 # Genera ctr_ps2.elf. El build de PC (CMake) no se ve afectado.
 
 EE_BIN = ctr_ps2.elf
-EE_OBJS = main_ps2.o audsrv_irx.o
+EE_OBJS = main_ps2.o platform/ps2/ps2_cd.o audsrv_irx.o
 
 EE_INCS = -I. -Iinclude -Iplatform/ps2/include -I$(GSKIT)/include
 
