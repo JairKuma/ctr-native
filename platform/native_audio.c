@@ -742,18 +742,37 @@ internal int NativeAudio_ReverbFirApply(const s16 *history, s32 cursor)
 #if defined(CTR_PS2)
 	// NOTE: PS2 build. Same result as the loop below, without a modulo per
 	// tap and with a 32-bit sum (sum of |coeffs| = 47526, * 32768 < 2^31).
+	// The table is symmetric (c[t] == c[38 - t]) and every odd tap except the
+	// middle one (19) is zero, so only 10 pairs + the middle tap are needed:
+	// c[t]*h[t] + c[38-t]*h[38-t] == c[t]*(h[t] + h[38-t]). Exact same sum.
 	if ((cursor >= 0) && (cursor < NATIVE_AUDIO_REVERB_FIR_TAPS))
 	{
-		int sum32 = 0;
-		int tap = 0;
-
-		for (int index = cursor; index < NATIVE_AUDIO_REVERB_FIR_TAPS; index++, tap++)
+		int lo = cursor;                                    // history index of tap 0
+		int hi = cursor + (NATIVE_AUDIO_REVERB_FIR_TAPS - 1); // history index of tap 38
+		if (hi >= NATIVE_AUDIO_REVERB_FIR_TAPS)
 		{
-			sum32 += (int)s_reverbFirCoeffs[tap] * (int)history[index];
+			hi -= NATIVE_AUDIO_REVERB_FIR_TAPS;
 		}
-		for (int index = 0; index < cursor; index++, tap++)
+		int mid = cursor + 19;
+		if (mid >= NATIVE_AUDIO_REVERB_FIR_TAPS)
 		{
-			sum32 += (int)s_reverbFirCoeffs[tap] * (int)history[index];
+			mid -= NATIVE_AUDIO_REVERB_FIR_TAPS;
+		}
+
+		int sum32 = (int)s_reverbFirCoeffs[19] * (int)history[mid];
+		for (int tap = 0; tap < 19; tap += 2)
+		{
+			sum32 += (int)s_reverbFirCoeffs[tap] * ((int)history[lo] + (int)history[hi]);
+			lo += 2;
+			if (lo >= NATIVE_AUDIO_REVERB_FIR_TAPS)
+			{
+				lo -= NATIVE_AUDIO_REVERB_FIR_TAPS;
+			}
+			hi -= 2;
+			if (hi < 0)
+			{
+				hi += NATIVE_AUDIO_REVERB_FIR_TAPS;
+			}
 		}
 		return NativeAudio_Clamp16(sum32 / 0x8000);
 	}
@@ -1148,40 +1167,74 @@ internal int NativeAudio_GetXAPseudo37800SampleNoLock(int channel, s64 pseudoFra
 	return NativeAudio_GetXAPcmSampleAtFrameNoLock(channel, frameIndex);
 }
 
+#if defined(CTR_PS2)
+// NOTE: PS2 build. MixFrame asks for the left channel and then the right one
+// for the same output frame; the fast path computes both in one pass and keeps
+// the right one here for the second call.
+global_variable int s_ps2XaZzRightValid = 0;
+global_variable u64 s_ps2XaZzRightFrame = 0;
+global_variable int s_ps2XaZzRightValue = 0;
+#endif
+
 internal int NativeAudio_ZigZagInterpolateXASampleNoLock(int channel)
 {
 #if defined(CTR_PS2)
-	// NOTE: PS2 build fast path, same result as the generic loop below. Use
-	// 32-bit group/phase math (no libgcc 64-bit divide) and, when all 29 taps
-	// are already decoded and inside the ring, read them directly instead of
-	// going through two range-checked calls per tap.
-	if ((s_audio.xa.sampleRate == XA_SAMPLE_RATE_37800) && (s_audio.xa.outputFrame <= 0xffffffffull) && (s_audio.xaStream.sectors != NULL))
+	if (channel == 1)
+	{
+		if (s_ps2XaZzRightValid && (s_ps2XaZzRightFrame == s_audio.xa.outputFrame))
+		{
+			s_ps2XaZzRightValid = 0;
+			return s_ps2XaZzRightValue;
+		}
+	}
+	s_ps2XaZzRightValid = 0;
+
+	// NOTE: PS2 build fast path, same result as the generic loop below, for
+	// both 37.8 kHz and 18.9 kHz XA (18.9 kHz reads each source frame twice).
+	// 32-bit group/phase math (no libgcc 64-bit divide), taps read straight
+	// from the ring when they are all decoded, and both channels at once.
+	if (((s_audio.xa.sampleRate == XA_SAMPLE_RATE_37800) || (s_audio.xa.sampleRate == XA_SAMPLE_RATE_18900)) &&
+	    (s_audio.xa.outputFrame <= 0xffffffffull) && (s_audio.xaStream.sectors != NULL))
 	{
 		struct NativeAudioXaStream *xs = &s_audio.xaStream;
+		const int shift = (s_audio.xa.sampleRate == XA_SAMPLE_RATE_18900) ? 1 : 0;
 		const u32 outputFrame32 = (u32)s_audio.xa.outputFrame;
 		const u32 group32 = outputFrame32 / NATIVE_AUDIO_XA_ZIGZAG_PHASES;
 		const int phase32 = (int)(outputFrame32 - (group32 * NATIVE_AUDIO_XA_ZIGZAG_PHASES));
-		const s64 newest = (s64)(group32 + 1u) * NATIVE_AUDIO_XA_ZIGZAG_INPUTS - 1;
-		const s64 oldest = newest - (NATIVE_AUDIO_XA_ZIGZAG_TAPS - 1);
+		const s64 newestPseudo = (s64)(group32 + 1u) * NATIVE_AUDIO_XA_ZIGZAG_INPUTS - 1;
+		const s64 oldestPseudo = newestPseudo - (NATIVE_AUDIO_XA_ZIGZAG_TAPS - 1);
 
-		if ((oldest >= 0) && (newest < (s64)s_audio.xa.frameCount))
+		if ((oldestPseudo >= 0) && ((newestPseudo >> shift) < (s64)s_audio.xa.frameCount))
 		{
-			while (((u64)newest >= xs->decodedFrames) && NativeAudio_XaStreamDecodeNextSectorNoLock())
+			const u64 newestSrc = (u64)(newestPseudo >> shift);
+			const u64 oldestSrc = (u64)(oldestPseudo >> shift);
+
+			while ((newestSrc >= xs->decodedFrames) && NativeAudio_XaStreamDecodeNextSectorNoLock())
 			{
 			}
 
-			if (((u64)newest < xs->decodedFrames) && ((xs->decodedFrames - (u64)oldest) <= NATIVE_AUDIO_XA_RING_FRAMES))
+			if ((newestSrc < xs->decodedFrames) && ((xs->decodedFrames - oldestSrc) <= NATIVE_AUDIO_XA_RING_FRAMES))
 			{
-				int fastSum = 0;
-				u32 frameIndex = (u32)newest;
+				int sumLeft = 0;
+				int sumRight = 0;
+				u32 pseudo = (u32)newestPseudo;
 
-				for (int tap = 0; tap < NATIVE_AUDIO_XA_ZIGZAG_TAPS; tap++, frameIndex--)
+				for (int tap = 0; tap < NATIVE_AUDIO_XA_ZIGZAG_TAPS; tap++, pseudo--)
 				{
-					const int sample = xs->ring[(frameIndex & (NATIVE_AUDIO_XA_RING_FRAMES - 1)) * NATIVE_AUDIO_CHANNELS + (u32)channel];
-					fastSum += (sample * s_xaZigZagTable[tap][phase32]) >> 15;
+					const s16 *frame = &xs->ring[((pseudo >> shift) & (NATIVE_AUDIO_XA_RING_FRAMES - 1)) * NATIVE_AUDIO_CHANNELS];
+					const int coeff = s_xaZigZagTable[tap][phase32];
+					sumLeft += ((int)frame[0] * coeff) >> 15;
+					sumRight += ((int)frame[1] * coeff) >> 15;
 				}
 
-				return NativeAudio_Clamp16(fastSum);
+				if (channel == 0)
+				{
+					s_ps2XaZzRightValid = 1;
+					s_ps2XaZzRightFrame = s_audio.xa.outputFrame;
+					s_ps2XaZzRightValue = NativeAudio_Clamp16(sumRight);
+					return NativeAudio_Clamp16(sumLeft);
+				}
+				return NativeAudio_Clamp16(sumRight);
 			}
 		}
 	}
