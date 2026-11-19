@@ -1231,6 +1231,45 @@ internal int NativeAudio_ZigZagInterpolateXASampleNoLock(int channel)
 			const u64 decoded = xs->decodedFrames;
 			s64 pseudo = newestPseudo;
 
+			// Usual case: every tap is decoded, inside the track and inside the
+			// ring without wrapping. Then a tight loop with no per-tap checks,
+			// and only one channel for mono XA (both ring channels are equal).
+			const s64 oldestTap = newestPseudo - (NATIVE_AUDIO_XA_ZIGZAG_TAPS - 1);
+			if (oldestTap >= 0)
+			{
+				const u64 srcNew = (u64)(newestPseudo >> shift);
+				const u64 srcOld = (u64)(oldestTap >> shift);
+				if ((srcNew < frameCount) && (srcNew < decoded) && ((decoded - srcOld) <= NATIVE_AUDIO_XA_RING_FRAMES) &&
+				    (((u32)srcOld & (NATIVE_AUDIO_XA_RING_FRAMES - 1)) <= ((u32)srcNew & (NATIVE_AUDIO_XA_RING_FRAMES - 1))))
+				{
+					const s16 *ringOld = &xs->ring[((u32)srcOld & (NATIVE_AUDIO_XA_RING_FRAMES - 1)) * NATIVE_AUDIO_CHANNELS];
+					const u32 srcOld32 = (u32)srcOld;
+					u32 ps = (u32)newestPseudo;
+					int tap;
+
+					if (xs->numChannels == 1)
+					{
+						for (tap = 0; tap < NATIVE_AUDIO_XA_ZIGZAG_TAPS; tap++, ps--)
+						{
+							const s16 *frame = ringOld + (((ps >> shift) - srcOld32) << 1);
+							sumLeft += ((int)frame[0] * (int)s_xaZigZagTable[tap][phase32]) >> 15;
+						}
+						sumRight = sumLeft;
+					}
+					else
+					{
+						for (tap = 0; tap < NATIVE_AUDIO_XA_ZIGZAG_TAPS; tap++, ps--)
+						{
+							const s16 *frame = ringOld + (((ps >> shift) - srcOld32) << 1);
+							const int coeff = s_xaZigZagTable[tap][phase32];
+							sumLeft += ((int)frame[0] * coeff) >> 15;
+							sumRight += ((int)frame[1] * coeff) >> 15;
+						}
+					}
+					pseudo = -1; // done: skip the checked loop below
+				}
+			}
+
 			for (int tap = 0; tap < NATIVE_AUDIO_XA_ZIGZAG_TAPS; tap++, pseudo--)
 			{
 				if (pseudo < 0)
