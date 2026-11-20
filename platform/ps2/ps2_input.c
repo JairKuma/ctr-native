@@ -1,4 +1,4 @@
-// PS2 port - input backend con libpad (rom0:SIO2MAN + rom0:PADMAN).
+// PS2 port - input backend con libpadx (rom0:XSIO2MAN + rom0:XPADMAN).
 //
 // Implementa la API de include/platform/native_input.h.
 //
