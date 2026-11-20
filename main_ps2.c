@@ -85,6 +85,16 @@
 // Partidas guardadas en la memory card de PS2 (ranura 1).
 #define PS2_MEMCARD_ROOT "mc0:/CTRNATIVE"
 
+// PRUEBA: 0 = sin memory card (no se cargan MCMAN/MCSERV y no se guarda nada).
+// En la PS2 real con OPL + MX4SIO, el MX4SIO va en la ranura de memory card y
+// comparte el bus SIO2: si tocar la memory card bloquea ese bus, el lector
+// virtual de OPL deja de responder (el juego se quedaba en la bandera, justo
+// donde busca las partidas). Poner 1 para volver a guardar en mc0.
+#define PS2_USE_MEMCARD 0
+// Sin memory card: rutas en rom0: (solo lectura), asi abrir/guardar falla al
+// momento sin tocar el bus, igual que si no hubiera partidas.
+#define PS2_NO_MEMCARD_ROOT "rom0:/CTRNATIVE"
+
 // --- Colores de diagnostico (consola real, sin texto) ------------------------
 // La pantalla muestra el color del ULTIMO paso completado; si se cuelga, el
 // fallo esta en el paso siguiente:
@@ -119,6 +129,14 @@ static void Ps2Main_LoadIopModules(void)
 
 	for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]); i++)
 	{
+#if !PS2_USE_MEMCARD
+		if ((strcmp(modules[i], "rom0:MCMAN") == 0) || (strcmp(modules[i], "rom0:MCSERV") == 0))
+		{
+			printf("[CTR PS2] Skip %s (memory card desactivada para la prueba)\n", modules[i]);
+			Ps2Renderer_DebugScreen(colors[i][0], colors[i][1], colors[i][2]);
+			continue;
+		}
+#endif
 		const int id = SifLoadModule(modules[i], 0, NULL);
 		printf("[CTR PS2] Load %s: %s (%d)\n", modules[i], (id >= 0) ? "ok" : "FAILED", id);
 		Ps2Renderer_DebugScreen(colors[i][0], colors[i][1], colors[i][2]);
@@ -295,13 +313,18 @@ int main(int argc, char *argv[])
 	// En PC las partidas van a la carpeta "memcards" junto al juego. En PS2 van
 	// a la memory card: es lo correcto en hardware real y, ademas, el host: de
 	// PCSX2 no permite crear ni listar carpetas.
-	if (NativeMemcard_SetRoot(PS2_MEMCARD_ROOT) != NATIVE_MEMCARD_OK)
+#if PS2_USE_MEMCARD
+	const char *memcardRoot = PS2_MEMCARD_ROOT;
+#else
+	const char *memcardRoot = PS2_NO_MEMCARD_ROOT;
+#endif
+	if (NativeMemcard_SetRoot(memcardRoot) != NATIVE_MEMCARD_OK)
 	{
-		printf("[CTR PS2] Warning: could not set memcard root %s\n", PS2_MEMCARD_ROOT);
+		printf("[CTR PS2] Warning: could not set memcard root %s\n", memcardRoot);
 	}
 	else
 	{
-		printf("[CTR PS2] Saves: %s\n", PS2_MEMCARD_ROOT);
+		printf("[CTR PS2] Saves: %s%s\n", memcardRoot, PS2_USE_MEMCARD ? "" : " (memory card desactivada: no se guarda)");
 	}
 
 	if (!NativeAssets_Validate())
