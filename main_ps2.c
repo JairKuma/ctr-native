@@ -99,10 +99,10 @@
 // La pantalla muestra el color del ULTIMO paso completado; si se cuelga, el
 // fallo esta en el paso siguiente:
 //   azul      GS iniciado
-//   morado    rom0:SIO2MAN cargado
-//   rosa      rom0:MCMAN cargado
-//   naranja   rom0:MCSERV cargado
-//   amarillo  rom0:PADMAN cargado
+//   morado    rom0:XSIO2MAN cargado
+//   rosa      rom0:XMCMAN cargado
+//   naranja   rom0:XMCSERV cargado
+//   amarillo  rom0:XPADMAN cargado
 //   celeste   rom0:LIBSD cargado
 //   blanco    audsrv.irx cargado
 //   gris      audsrv iniciado; buscando CTR_U.BIN
@@ -118,7 +118,16 @@ extern unsigned int size_audsrv_irx;
 // en la BIOS de cualquier PS2; audsrv.irx (del PS2SDK) va dentro del ELF.
 static void Ps2Main_LoadIopModules(void)
 {
-	static const char *const modules[] = {"rom0:SIO2MAN", "rom0:MCMAN", "rom0:MCSERV", "rom0:PADMAN", "rom0:LIBSD"};
+	// Se usan las versiones "X" de los modulos (XSIO2MAN, XMCMAN, XMCSERV,
+	// XPADMAN): son las que usan los juegos de PS2 y con las que OPL deja
+	// convivir al MX4SIO (que va en la ranura de memory card y comparte el bus
+	// SIO2). Con las antiguas (SIO2MAN, PADMAN, MCMAN) en la PS2 real el mando
+	// salia desconectado y tocar la memory card colgaba el juego en la bandera.
+	// El lado EE usa libpadx (Makefile.ps2), la libreria de mandos de XPADMAN.
+	// Si la BIOS no tiene la version X (consolas muy antiguas), se prueba la
+	// antigua (entonces el mando no funcionara, pero el juego sigue).
+	static const char *const modules[] = {"rom0:XSIO2MAN", "rom0:XMCMAN", "rom0:XMCSERV", "rom0:XPADMAN", "rom0:LIBSD"};
+	static const char *const fallbacks[] = {"rom0:SIO2MAN", "rom0:MCMAN", "rom0:MCSERV", "rom0:PADMAN", NULL};
 	static const u8 colors[][3] = {
 	    {0x60, 0x00, 0xa0}, // morado
 	    {0xff, 0x60, 0xc0}, // rosa
@@ -130,15 +139,20 @@ static void Ps2Main_LoadIopModules(void)
 	for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]); i++)
 	{
 #if !PS2_USE_MEMCARD
-		if ((strcmp(modules[i], "rom0:MCMAN") == 0) || (strcmp(modules[i], "rom0:MCSERV") == 0))
+		if ((strcmp(modules[i], "rom0:XMCMAN") == 0) || (strcmp(modules[i], "rom0:XMCSERV") == 0))
 		{
 			printf("[CTR PS2] Skip %s (memory card desactivada para la prueba)\n", modules[i]);
 			Ps2Renderer_DebugScreen(colors[i][0], colors[i][1], colors[i][2]);
 			continue;
 		}
 #endif
-		const int id = SifLoadModule(modules[i], 0, NULL);
+		int id = SifLoadModule(modules[i], 0, NULL);
 		printf("[CTR PS2] Load %s: %s (%d)\n", modules[i], (id >= 0) ? "ok" : "FAILED", id);
+		if ((id < 0) && (fallbacks[i] != NULL))
+		{
+			id = SifLoadModule(fallbacks[i], 0, NULL);
+			printf("[CTR PS2] Load %s (fallback): %s (%d)\n", fallbacks[i], (id >= 0) ? "ok" : "FAILED", id);
+		}
 		Ps2Renderer_DebugScreen(colors[i][0], colors[i][1], colors[i][2]);
 	}
 

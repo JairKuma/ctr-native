@@ -19,7 +19,8 @@ EE_CFLAGS = -std=gnu17 -DCTR_NATIVE -DCTR_PS2 -fno-strict-aliasing \
 	-Wno-error=implicit-function-declaration
 
 EE_LDFLAGS = -L$(GSKIT)/lib
-EE_LIBS = -lgskit -ldmakit -lpad -lcdvd -laudsrv -lpatches -lm
+# libpadx: libreria de mandos para rom0:XPADMAN (ver main_ps2.c).
+EE_LIBS = -lgskit -ldmakit -lpadx -lcdvd -laudsrv -lpatches -lm
 
 all: $(EE_BIN)
 
