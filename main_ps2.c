@@ -85,12 +85,13 @@
 // Partidas guardadas en la memory card de PS2 (ranura 1).
 #define PS2_MEMCARD_ROOT "mc0:/CTRNATIVE"
 
-// PRUEBA: 0 = sin memory card (no se cargan MCMAN/MCSERV y no se guarda nada).
+// 1 = partidas en la memory card (mc0) con rom0:XMCMAN + rom0:XMCSERV.
+// 0 = sin memory card (no se cargan esos modulos y no se guarda nada).
 // En la PS2 real con OPL + MX4SIO, el MX4SIO va en la ranura de memory card y
-// comparte el bus SIO2: si tocar la memory card bloquea ese bus, el lector
-// virtual de OPL deja de responder (el juego se quedaba en la bandera, justo
-// donde busca las partidas). Poner 1 para volver a guardar en mc0.
-#define PS2_USE_MEMCARD 0
+// comparte el bus SIO2: con los modulos ANTIGUOS (MCMAN/MCSERV) tocar la
+// memory card colgaba el juego en la bandera. Con los X deberia convivir; si
+// vuelve a colgarse ahi, poner 0.
+#define PS2_USE_MEMCARD 1
 // Sin memory card: rutas en rom0: (solo lectura), asi abrir/guardar falla al
 // momento sin tocar el bus, igual que si no hubiera partidas.
 #define PS2_NO_MEMCARD_ROOT "rom0:/CTRNATIVE"
