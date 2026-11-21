@@ -535,6 +535,7 @@ internal void Ps2AudioOut_Report(void)
 	       Ps2Prof_Percent(g_ps2ProfSpu2Cycles, total), Ps2Prof_Percent(g_ps2ProfCdCycles, total), Ps2Prof_Percent(g_ps2ProfGsCycles, total),
 	       Ps2Prof_Percent(g_ps2ProfIdleCycles, total), Ps2Prof_Percent(rest, total));
 	Ps2Spu2_Report(total); // tambien pone a 0 g_ps2ProfSpu2Cycles
+	Ps2Xa_Report();        // native_audio.c
 	g_ps2ProfAudioCycles = 0;
 	g_ps2ProfCdCycles = 0;
 	g_ps2ProfIdleCycles = 0;
