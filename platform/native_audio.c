@@ -3236,8 +3236,19 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 				goto ps2XaDone;
 			}
 #endif
+#if defined(CTR_PS2)
+			// En la SPU de PS1 el volumen maestro 0x3FFF es volumen COMPLETO, pero
+			// aqui se dividia entre 0x8000 (= la mitad). Con las voces ya en el chip
+			// SPU2 (volumen real), la XA sonaba a la mitad que la musica y los
+			// efectos: se usa el doble del maestro (0x3FFF -> 0x7FFE = completo).
+			const s16 xaMasterLeft = g_ps2Spu2Active ? (s16)((s_audio.masterVolumeLeft > 0x3FFF) ? 0x7FFF : s_audio.masterVolumeLeft * 2) : s_audio.masterVolumeLeft;
+			const s16 xaMasterRight = g_ps2Spu2Active ? (s16)((s_audio.masterVolumeRight > 0x3FFF) ? 0x7FFF : s_audio.masterVolumeRight * 2) : s_audio.masterVolumeRight;
+			int left = NativeAudio_ApplyVolume(srcLeft, s_audio.xa.volumeLeft, xaMasterLeft);
+			int right = NativeAudio_ApplyVolume(srcRight, s_audio.xa.volumeRight, xaMasterRight);
+#else
 			int left = NativeAudio_ApplyVolume(srcLeft, s_audio.xa.volumeLeft, s_audio.masterVolumeLeft);
 			int right = NativeAudio_ApplyVolume(srcRight, s_audio.xa.volumeRight, s_audio.masterVolumeRight);
+#endif
 #if defined(CTR_PS2)
 			{
 				const int as = (srcLeft < 0) ? -srcLeft : srcLeft;
