@@ -20,6 +20,14 @@
 // eso el tono se corrige (x 44100/48000). Las envolventes ADSR y el eco van
 // ~9% mas rapidos (no se corrige: casi no se nota).
 //
+// RITMO (paso 2): el juego cambia las voces cuando entrega cada VBlank, y si va
+// lento (15-25 fps) entrega varios VBlanks de golpe. Antes cada uno se mandaba al
+// momento, asi que las notas llegaban a rafagas y la musica "tropezaba". Ahora
+// cada VBlank del juego deja su lista en una COLA, y un hilo propio (despertado
+// por la interrupcion de VBlank de verdad) manda UNA lista por VBlank: las notas
+// salen espaciadas como en la PS1, a cambio de un pequeno retraso (1-4 VBlanks)
+// cuando el juego va lento.
+//
 // Va en un objeto aparte (como ps2_cd.c) para que las cabeceras de la libsd
 // no choquen con las del juego.
 
@@ -63,6 +71,32 @@ static unsigned char s_ps2Spu2Send[CTRSPU2_RPC_BUFFER_BYTES] __attribute__((alig
 static int s_ps2Spu2Recv[16] __attribute__((aligned(64)));
 
 static sceSdBatch s_ps2Spu2Queue[PS2_SPU2_QUEUE_MAX];
+// Lista completa de un VBlank (key off + cambios + volumenes + key on).
+static sceSdBatch s_ps2Spu2Build[CTRSPU2_MAX_BATCH];
+
+// --- Cola de listas (una por VBlank del juego) -------------------------------
+// La rellena el hilo principal y la vacia el hilo de envio (una por VBlank de
+// hardware). Las escrituras van en un anillo; cada lista es un tramo de el.
+#define PS2_SPU2_RING_ENTRIES 16384u // potencia de 2
+#define PS2_SPU2_RING_SLOTS   128u   // potencia de 2
+// Si hay mas de estas listas esperando, se mandan varias por VBlank para no
+// acumular retraso.
+#define PS2_SPU2_MAX_BACKLOG  6u
+static sceSdBatch s_ps2Spu2Ring[PS2_SPU2_RING_ENTRIES];
+static u32 s_ps2Spu2SlotStart[PS2_SPU2_RING_SLOTS];
+static u32 s_ps2Spu2SlotCount[PS2_SPU2_RING_SLOTS];
+static volatile u32 s_ps2Spu2SlotWrite = 0; // lo sube el hilo principal
+static volatile u32 s_ps2Spu2SlotRead = 0;  // lo sube quien manda (con el cerrojo)
+static u32 s_ps2Spu2RingWrite = 0;          // en escrituras, sin envolver
+
+// Cerrojo: solo un envio al IOP a la vez (hilo principal o hilo de envio).
+static int s_ps2Spu2Lock = -1;
+static int s_ps2Spu2WakeSema = -1;
+static int s_ps2Spu2Thread = -1;
+static u8 s_ps2Spu2ThreadStack[16 * 1024] __attribute__((aligned(16)));
+extern void *_gp;
+#define PS2_SPU2_THREAD_PRIORITY 30 // mas que el hilo de audio (32) y el principal (64)
+static unsigned int s_ps2Spu2StatMaxBacklog = 0;
 static int s_ps2Spu2QueueCount = 0;
 static unsigned int s_ps2Spu2KeyOn = 0;       // key on pendientes
 static unsigned int s_ps2Spu2KeyOff = 0;      // key off pendientes
@@ -168,6 +202,168 @@ static unsigned int Ps2Spu2_ConvertAddr(unsigned int addr)
 	return PS2_SPU2_RAM_BASE + (addr & 0x7FFFFu);
 }
 
+static void Ps2Spu2_LockTake(void)
+{
+	if (s_ps2Spu2Lock >= 0)
+	{
+		WaitSema(s_ps2Spu2Lock);
+	}
+}
+
+static void Ps2Spu2_LockGive(void)
+{
+	if (s_ps2Spu2Lock >= 0)
+	{
+		SignalSema(s_ps2Spu2Lock);
+	}
+}
+
+// Manda al IOP la lista mas antigua de la cola. Con el cerrojo cogido.
+static int Ps2Spu2_SendOldestLocked(void)
+{
+	const u32 read = s_ps2Spu2SlotRead;
+	if (read == s_ps2Spu2SlotWrite)
+	{
+		return 0;
+	}
+	const u32 slot = read & (PS2_SPU2_RING_SLOTS - 1u);
+	const u32 start = s_ps2Spu2SlotStart[slot];
+	const u32 count = s_ps2Spu2SlotCount[slot];
+
+	CtrSpu2Header *header = (CtrSpu2Header *)s_ps2Spu2Send;
+	sceSdBatch *out = (sceSdBatch *)(s_ps2Spu2Send + CTRSPU2_HEADER_BYTES);
+	for (u32 i = 0; i < count; i++)
+	{
+		out[i] = s_ps2Spu2Ring[(start + i) & (PS2_SPU2_RING_ENTRIES - 1u)];
+	}
+	memset(header, 0, sizeof(*header));
+	header->count = count;
+	Ps2Spu2_Call(CTRSPU2_CMD_BATCH, CTRSPU2_HEADER_BYTES + (int)(count * sizeof(sceSdBatch)));
+
+	s_ps2Spu2SlotRead = read + 1u;
+	return 1;
+}
+
+// Manda todo lo que haya en la cola (antes de subir muestras o cambiar el eco).
+static void Ps2Spu2_DrainLocked(void)
+{
+	while (Ps2Spu2_SendOldestLocked())
+	{
+	}
+}
+
+// Mete una lista en la cola. Si no cabe, se manda lo mas antiguo ya.
+static void Ps2Spu2_Enqueue(const sceSdBatch *batch, u32 count)
+{
+	for (;;)
+	{
+		const u32 pending = s_ps2Spu2SlotWrite - s_ps2Spu2SlotRead;
+		u32 usedEntries = 0;
+		if (pending != 0)
+		{
+			usedEntries = s_ps2Spu2RingWrite - s_ps2Spu2SlotStart[s_ps2Spu2SlotRead & (PS2_SPU2_RING_SLOTS - 1u)];
+		}
+		if ((pending < PS2_SPU2_RING_SLOTS) && (usedEntries + count <= PS2_SPU2_RING_ENTRIES))
+		{
+			break;
+		}
+		Ps2Spu2_LockTake();
+		Ps2Spu2_SendOldestLocked();
+		Ps2Spu2_LockGive();
+	}
+
+	const u32 start = s_ps2Spu2RingWrite;
+	for (u32 i = 0; i < count; i++)
+	{
+		s_ps2Spu2Ring[(start + i) & (PS2_SPU2_RING_ENTRIES - 1u)] = batch[i];
+	}
+	const u32 slot = s_ps2Spu2SlotWrite & (PS2_SPU2_RING_SLOTS - 1u);
+	s_ps2Spu2SlotStart[slot] = start;
+	s_ps2Spu2SlotCount[slot] = count;
+	s_ps2Spu2RingWrite = start + count;
+	__asm__ volatile("" ::: "memory"); // publicar despues de copiar
+	s_ps2Spu2SlotWrite = s_ps2Spu2SlotWrite + 1u;
+}
+
+// Hilo de envio: en cada VBlank de hardware manda una lista (o mas si se
+// acumulan), asi las notas salen al ritmo real aunque el juego vaya lento.
+static void Ps2Spu2_SenderThread(void *arg)
+{
+	(void)arg;
+	for (;;)
+	{
+		WaitSema(s_ps2Spu2WakeSema);
+		Ps2Spu2_LockTake();
+		const u32 backlog = s_ps2Spu2SlotWrite - s_ps2Spu2SlotRead;
+		if (backlog > s_ps2Spu2StatMaxBacklog)
+		{
+			s_ps2Spu2StatMaxBacklog = backlog;
+		}
+		// Normalmente una lista por VBlank; si se acumulan muchas, las que sobran.
+		u32 toSend = 0;
+		if (backlog > PS2_SPU2_MAX_BACKLOG)
+		{
+			toSend = backlog - PS2_SPU2_MAX_BACKLOG + 1u;
+		}
+		else if (backlog > 0)
+		{
+			toSend = 1u;
+		}
+		const unsigned int t0 = Ps2Spu2_Now();
+		for (u32 i = 0; i < toSend; i++)
+		{
+			Ps2Spu2_SendOldestLocked();
+		}
+		g_ps2ProfSpu2Cycles += (unsigned int)(Ps2Spu2_Now() - t0);
+		Ps2Spu2_LockGive();
+	}
+}
+
+// Desde la interrupcion de VBlank (ps2_platform.c).
+void Ps2Spu2_OnVBlankIsr(void)
+{
+	if (s_ps2Spu2WakeSema >= 0)
+	{
+		iSignalSema(s_ps2Spu2WakeSema);
+	}
+}
+
+static int Ps2Spu2_StartSender(void)
+{
+	ee_sema_t sema;
+
+	memset(&sema, 0, sizeof(sema));
+	sema.init_count = 1;
+	sema.max_count = 1;
+	s_ps2Spu2Lock = CreateSema(&sema);
+
+	memset(&sema, 0, sizeof(sema));
+	sema.init_count = 0;
+	sema.max_count = 1;
+	s_ps2Spu2WakeSema = CreateSema(&sema);
+	if ((s_ps2Spu2Lock < 0) || (s_ps2Spu2WakeSema < 0))
+	{
+		printf("[CTR PS2] spu2: CreateSema failed\n");
+		return 0;
+	}
+
+	ee_thread_t thread;
+	memset(&thread, 0, sizeof(thread));
+	thread.func = (void *)Ps2Spu2_SenderThread;
+	thread.stack = s_ps2Spu2ThreadStack;
+	thread.stack_size = sizeof(s_ps2Spu2ThreadStack);
+	thread.gp_reg = &_gp;
+	thread.initial_priority = PS2_SPU2_THREAD_PRIORITY;
+	s_ps2Spu2Thread = CreateThread(&thread);
+	if (s_ps2Spu2Thread < 0)
+	{
+		printf("[CTR PS2] spu2: CreateThread failed\n");
+		return 0;
+	}
+	StartThread(s_ps2Spu2Thread, NULL);
+	return 1;
+}
+
 int Ps2Spu2_Init(void)
 {
 	int i;
@@ -226,6 +422,7 @@ int Ps2Spu2_Init(void)
 
 	g_ps2Spu2Active = 1; // a partir de aqui Flush manda de verdad
 	Ps2Spu2_Flush();
+	Ps2Spu2_DrainLocked(); // todavia no hay hilo de envio: mandar ya
 	if (s_ps2Spu2StatErrors != 0)
 	{
 		g_ps2Spu2Active = 0;
@@ -233,7 +430,14 @@ int Ps2Spu2_Init(void)
 		return 0;
 	}
 
-	printf("[CTR PS2] spu2: voces y eco en el chip SPU2 (RAM de PS1 en 0x%06x)\n", PS2_SPU2_RAM_BASE);
+	if (!Ps2Spu2_StartSender())
+	{
+		g_ps2Spu2Active = 0;
+		printf("[CTR PS2] spu2: no se pudo crear el hilo de envio: se usa el sonido por software\n");
+		return 0;
+	}
+
+	printf("[CTR PS2] spu2: voces y eco en el chip SPU2 (RAM de PS1 en 0x%06x), envio a ritmo de VBlank\n", PS2_SPU2_RAM_BASE);
 	return 1;
 }
 
@@ -245,8 +449,7 @@ void Ps2Spu2_Flush(void)
 	}
 
 	const unsigned int t0 = Ps2Spu2_Now();
-	CtrSpu2Header *header = (CtrSpu2Header *)s_ps2Spu2Send;
-	sceSdBatch *out = (sceSdBatch *)(s_ps2Spu2Send + CTRSPU2_HEADER_BYTES);
+	sceSdBatch *out = s_ps2Spu2Build;
 	int n = 0;
 
 	const unsigned int keyOff = s_ps2Spu2KeyOff;
@@ -290,9 +493,8 @@ void Ps2Spu2_Flush(void)
 		n++;
 	}
 
-	memset(header, 0, sizeof(*header));
-	header->count = (unsigned int)n;
-	Ps2Spu2_Call(CTRSPU2_CMD_BATCH, CTRSPU2_HEADER_BYTES + n * (int)sizeof(sceSdBatch));
+	// A la cola: el hilo de envio la manda en su VBlank.
+	Ps2Spu2_Enqueue(out, (u32)n);
 
 	s_ps2Spu2StatFlushes++;
 	s_ps2Spu2StatEntries += (unsigned int)n;
@@ -314,6 +516,8 @@ void Ps2Spu2_Upload(const unsigned char *memory, unsigned int memorySize, unsign
 
 	// Lo pendiente va antes (el orden importa).
 	Ps2Spu2_Flush();
+	Ps2Spu2_LockTake();
+	Ps2Spu2_DrainLocked();
 
 	const unsigned int t0 = Ps2Spu2_Now();
 
@@ -355,6 +559,7 @@ void Ps2Spu2_Upload(const unsigned char *memory, unsigned int memorySize, unsign
 	}
 
 	g_ps2ProfSpu2Cycles += (unsigned int)(Ps2Spu2_Now() - t0);
+	Ps2Spu2_LockGive();
 }
 
 void Ps2Spu2_VoiceUpdate(int voice, unsigned int what, int volumeLeft, int volumeRight, unsigned int pitch, unsigned int startAddr, unsigned int loopAddr,
@@ -443,6 +648,8 @@ void Ps2Spu2_SetReverbMode(int mode, int delay, int feedback)
 	}
 
 	Ps2Spu2_Flush();
+	Ps2Spu2_LockTake();
+	Ps2Spu2_DrainLocked();
 	const unsigned int t0 = Ps2Spu2_Now();
 
 	s_ps2Spu2ReverbMode = mode;
@@ -458,9 +665,9 @@ void Ps2Spu2_SetReverbMode(int mode, int delay, int feedback)
 	effect->feedback = feedback;
 	effect->enable = s_ps2Spu2ReverbEnabled;
 	const int result = Ps2Spu2_Call(CTRSPU2_CMD_EFFECT, (int)sizeof(*effect));
-	printf("[CTR PS2] spu2: eco modo %d (delay %d, feedback %d) -> %d\n", mode, delay, feedback, result);
-
 	g_ps2ProfSpu2Cycles += (unsigned int)(Ps2Spu2_Now() - t0);
+	Ps2Spu2_LockGive();
+	printf("[CTR PS2] spu2: eco modo %d (delay %d, feedback %d) -> %d\n", mode, delay, feedback, result);
 }
 
 void Ps2Spu2_SetReverbDepth(int left, int right)
@@ -500,9 +707,10 @@ void Ps2Spu2_Report(unsigned long long totalCycles)
 		pct = (unsigned int)((g_ps2ProfSpu2Cycles * 100ull + totalCycles / 2ull) / totalCycles);
 	}
 	s_ps2Spu2TotalUploadKB += s_ps2Spu2StatUploadBytes / 1024u;
-	printf("[CTR PS2] spu2: envios %u | cambios %u | notas %u | subido %u KB (total %u KB) | eco modo %d %s | errores %u | cpu %u%%\n",
-	       s_ps2Spu2StatFlushes, s_ps2Spu2StatEntries, s_ps2Spu2StatKeyOns, s_ps2Spu2StatUploadBytes / 1024u, s_ps2Spu2TotalUploadKB,
-	       s_ps2Spu2ReverbMode, s_ps2Spu2ReverbEnabled ? "on" : "off", s_ps2Spu2StatErrors, pct);
+	printf("[CTR PS2] spu2: envios %u | cambios %u | notas %u | cola max %u | subido %u KB (total %u KB) | eco modo %d %s | errores %u | cpu %u%%\n",
+	       s_ps2Spu2StatFlushes, s_ps2Spu2StatEntries, s_ps2Spu2StatKeyOns, s_ps2Spu2StatMaxBacklog, s_ps2Spu2StatUploadBytes / 1024u,
+	       s_ps2Spu2TotalUploadKB, s_ps2Spu2ReverbMode, s_ps2Spu2ReverbEnabled ? "on" : "off", s_ps2Spu2StatErrors, pct);
+	s_ps2Spu2StatMaxBacklog = 0;
 	s_ps2Spu2StatFlushes = 0;
 	s_ps2Spu2StatEntries = 0;
 	s_ps2Spu2StatUploadBytes = 0;

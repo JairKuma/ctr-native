@@ -32,8 +32,11 @@ void Ps2Spu2_SetReverbMode(int mode, int delay, int feedback);
 void Ps2Spu2_SetReverbDepth(int left, int right);
 void Ps2Spu2_SetReverbVoices(unsigned int voiceBits);
 
-// Manda a la SPU2 todo lo pendiente (una vez por VBlank).
+// Cierra la lista de este VBlank del juego y la deja en la cola de envio.
 void Ps2Spu2_Flush(void);
+
+// Desde la interrupcion de VBlank: despierta al hilo de envio.
+void Ps2Spu2_OnVBlankIsr(void);
 
 // Informe para el log (cada ~5 s). totalCycles = ciclos de la EE del periodo.
 void Ps2Spu2_Report(unsigned long long totalCycles);
