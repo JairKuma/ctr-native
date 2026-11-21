@@ -26,6 +26,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "platform/ps2/ps2_spu2.h"
+extern unsigned long long g_ps2ProfSpu2Cycles; // ps2_spu2.c
+
 #define PS2_AUDIO_FRAME_BYTES 4 // 16 bits x 2 canales
 // Muestras por VBlank NTSC: 44100 / (60000 / 1001) = 735,735...
 #define PS2_AUDIO_RATE_NUM (44100u * 1001u)
@@ -490,6 +493,7 @@ internal void Ps2AudioOut_Report(void)
 		g_ps2ProfCdCycles = 0;
 		g_ps2ProfIdleCycles = 0;
 		g_ps2ProfGsCycles = 0;
+		g_ps2ProfSpu2Cycles = 0;
 		return;
 	}
 
@@ -525,11 +529,12 @@ internal void Ps2AudioOut_Report(void)
 		g_ps2ProfMixFrames = 0;
 		s_ps2AudioBudgetSkippedVBlanks = 0;
 	}
-	const unsigned long long known = g_ps2ProfAudioCycles + g_ps2ProfCdCycles + g_ps2ProfIdleCycles + g_ps2ProfGsCycles;
+	const unsigned long long known = g_ps2ProfAudioCycles + g_ps2ProfCdCycles + g_ps2ProfIdleCycles + g_ps2ProfGsCycles + g_ps2ProfSpu2Cycles;
 	const unsigned long long rest = (known < total) ? (total - known) : 0ull;
-	printf("[CTR PS2] cpu: audio %u%% | cd %u%% | gs %u%% | libre %u%% | juego %u%%\n", Ps2Prof_Percent(g_ps2ProfAudioCycles, total),
-	       Ps2Prof_Percent(g_ps2ProfCdCycles, total), Ps2Prof_Percent(g_ps2ProfGsCycles, total), Ps2Prof_Percent(g_ps2ProfIdleCycles, total),
-	       Ps2Prof_Percent(rest, total));
+	printf("[CTR PS2] cpu: audio %u%% | spu2 %u%% | cd %u%% | gs %u%% | libre %u%% | juego %u%%\n", Ps2Prof_Percent(g_ps2ProfAudioCycles, total),
+	       Ps2Prof_Percent(g_ps2ProfSpu2Cycles, total), Ps2Prof_Percent(g_ps2ProfCdCycles, total), Ps2Prof_Percent(g_ps2ProfGsCycles, total),
+	       Ps2Prof_Percent(g_ps2ProfIdleCycles, total), Ps2Prof_Percent(rest, total));
+	Ps2Spu2_Report(total); // tambien pone a 0 g_ps2ProfSpu2Cycles
 	g_ps2ProfAudioCycles = 0;
 	g_ps2ProfCdCycles = 0;
 	g_ps2ProfIdleCycles = 0;

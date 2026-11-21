@@ -10,6 +10,7 @@
 #include <macros.h>
 
 #include "platform/native_audio.h"
+#include "platform/ps2/ps2_spu2.h"
 #include "platform/native_gpu.h"
 #include "platform/native_input.h"
 #include "platform/native_log.h"
@@ -101,6 +102,9 @@ internal void Ps2_EmitVBlank(void)
 	}
 
 	NativeAudio_StepVBlank();
+	// Lo que el juego ha cambiado en las voces este VBlank (key on/off,
+	// volumenes, tono...) se manda de una vez al chip SPU2 (ps2_spu2.c).
+	Ps2Spu2_Flush();
 	// Audio: avanza con el reloj real (VBlanks de hardware), no con los del
 	// juego; si no hay nada pendiente no hace nada.
 	Ps2AudioOut_Pump();
