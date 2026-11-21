@@ -3151,6 +3151,11 @@ unsigned long long g_ps2ProfReverbCycles = 0;
 unsigned long long g_ps2ProfVoiceSamples = 0; // voces sonando x muestras
 unsigned long long g_ps2ProfMixFrames = 0;
 unsigned long long g_ps2ProfXaCdCycles = 0; // esperando al disco por la XA
+// Diagnostico de la XA (lo imprime Ps2Xa_Report cada ~5 s).
+int g_ps2XaPeakSrc = 0;     // pico de la XA decodificada (antes del volumen)
+int g_ps2XaPeakOut = 0;     // pico de la XA ya con volumen (lo que se oye)
+u32 g_ps2XaMixFrames = 0;   // frames con XA mezclada
+u32 g_ps2XaNoMixFrames = 0; // frames con XA activa pero "CD mix" apagado
 extern unsigned long long g_ps2ProfCdCycles; // ps2_audio_out.c
 
 static inline u32 NativeAudio_Ps2Now(void)
@@ -3190,6 +3195,9 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 		}
 		else if (!s_audio.cdMixEnabled)
 		{
+#if defined(CTR_PS2)
+			g_ps2XaNoMixFrames++;
+#endif
 			NativeAudio_AdvanceXAOutputFrameNoLock();
 		}
 		else
@@ -3198,6 +3206,21 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 			int srcRight = NativeAudio_GetXAMixSampleNoLock(1);
 			int left = NativeAudio_ApplyVolume(srcLeft, s_audio.xa.volumeLeft, s_audio.masterVolumeLeft);
 			int right = NativeAudio_ApplyVolume(srcRight, s_audio.xa.volumeRight, s_audio.masterVolumeRight);
+#if defined(CTR_PS2)
+			{
+				const int as = (srcLeft < 0) ? -srcLeft : srcLeft;
+				const int ao = (left < 0) ? -left : left;
+				if (as > g_ps2XaPeakSrc)
+				{
+					g_ps2XaPeakSrc = as;
+				}
+				if (ao > g_ps2XaPeakOut)
+				{
+					g_ps2XaPeakOut = ao;
+				}
+				g_ps2XaMixFrames++;
+			}
+#endif
 
 			NativeAudio_MixSample(&mixLeft, &mixRight, left, right);
 			if (s_audio.cdReverbEnabled)
@@ -3870,6 +3893,12 @@ void NativeAudio_SpuSetCommonMasterVolume(s16 left, s16 right)
 
 void NativeAudio_SpuSetCommonCDMix(s32 enabled)
 {
+#if defined(CTR_PS2)
+	if ((enabled != 0) != (s_audio.cdMixEnabled != 0))
+	{
+		printf("[CTR PS2] xa: CD mix %d -> %d\n", s_audio.cdMixEnabled, enabled != 0);
+	}
+#endif
 	NativeAudio_LockOutput();
 
 	s_audio.cdMixEnabled = enabled != 0;
@@ -3881,6 +3910,12 @@ void NativeAudio_SpuSetCommonCDMix(s32 enabled)
 
 void NativeAudio_SpuSetCommonCDVolume(s16 left, s16 right)
 {
+#if defined(CTR_PS2)
+	if ((left != s_audio.xa.volumeLeft) || (right != s_audio.xa.volumeRight))
+	{
+		printf("[CTR PS2] xa: volumen CD %d,%d -> %d,%d\n", s_audio.xa.volumeLeft, s_audio.xa.volumeRight, left, right);
+	}
+#endif
 	NativeAudio_LockOutput();
 
 	s_audio.xa.volumeLeft = left;
@@ -3917,6 +3952,12 @@ int NativeAudio_GetXATrackLength(int categoryID, int xaID)
 
 void NativeAudio_StopXA(void)
 {
+#if defined(CTR_PS2)
+	if (s_audio.xa.active)
+	{
+		printf("[CTR PS2] xa: parada (tipo %d n.o %d)\n", s_audio.xa.categoryID, s_audio.xa.xaID);
+	}
+#endif
 	NativeAudio_LockOutput();
 
 	NativeAudio_CloseXANoLock();
@@ -3926,6 +3967,12 @@ void NativeAudio_StopXA(void)
 
 void NativeAudio_SetXAVolume(int volumeLeft, int volumeRight)
 {
+#if defined(CTR_PS2)
+	if ((volumeLeft == 0) != (s_audio.xa.volumeLeft == 0))
+	{
+		printf("[CTR PS2] xa: volumen (fundido) %d -> %d\n", s_audio.xa.volumeLeft, volumeLeft);
+	}
+#endif
 	NativeAudio_LockOutput();
 
 	s_audio.xa.volumeLeft = (s16)volumeLeft;
@@ -4179,3 +4226,17 @@ int NativeAudio_GetXAMaxSampleAtOffset(int xaCurrOffset)
 
 	return max;
 }
+
+#if defined(CTR_PS2)
+// Estado de la XA para el log (ps2_audio_out.c, cada ~5 s).
+void Ps2Xa_Report(void)
+{
+	printf("[CTR PS2] xa estado: sonando %d (tipo %d n.o %d) | vol %d,%d | master %d | mix %d | mezclado %u / sin mix %u frames | pico %d -> %d\n",
+	       s_audio.xa.active, s_audio.xa.categoryID, s_audio.xa.xaID, s_audio.xa.volumeLeft, s_audio.xa.volumeRight, s_audio.masterVolumeLeft,
+	       s_audio.cdMixEnabled, (unsigned)g_ps2XaMixFrames, (unsigned)g_ps2XaNoMixFrames, g_ps2XaPeakSrc, g_ps2XaPeakOut);
+	g_ps2XaPeakSrc = 0;
+	g_ps2XaPeakOut = 0;
+	g_ps2XaMixFrames = 0;
+	g_ps2XaNoMixFrames = 0;
+}
+#endif
