@@ -3142,6 +3142,7 @@ int NativeAudio_RestoreState(const void *src, int srcSize)
 }
 
 #if defined(CTR_PS2)
+#include "platform/ps2/ps2_spu2.h"
 // NOTE: PS2 build. Desglose del coste del sonido para el medidor de CPU
 // (ps2_audio_out.c lo imprime): ciclos de la EE en musica XA, voces y eco.
 unsigned long long g_ps2ProfXaCycles = 0;
@@ -3212,7 +3213,12 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 #if defined(CTR_PS2)
 	const unsigned long long profXaCd = g_ps2ProfCdCycles - profCd0;
 #endif
+#if defined(CTR_PS2)
+	// Con la SPU2 activa las voces suenan en el chip (ps2_spu2.c): no emularlas.
+	if (!s_audio.muted && !g_ps2Spu2Active)
+#else
 	if (!s_audio.muted)
+#endif
 	{
 		for (i = 0; i < NATIVE_AUDIO_SPU_VOICE_COUNT; i++)
 		{
@@ -3266,9 +3272,15 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 	}
 
 	PS2_AUDIO_PROF_MARK(profT2);
-	NativeAudio_ReverbProcessNoLock(reverbSendLeft, reverbSendRight, &reverbWetLeft, &reverbWetRight);
-	NativeAudio_MixSample(&mixLeft, &mixRight, NativeAudio_ApplyMasterVolume(reverbWetLeft, s_audio.masterVolumeLeft),
-	                      NativeAudio_ApplyMasterVolume(reverbWetRight, s_audio.masterVolumeRight));
+#if defined(CTR_PS2)
+	// El eco tambien lo hace la SPU2.
+	if (!g_ps2Spu2Active)
+#endif
+	{
+		NativeAudio_ReverbProcessNoLock(reverbSendLeft, reverbSendRight, &reverbWetLeft, &reverbWetRight);
+		NativeAudio_MixSample(&mixLeft, &mixRight, NativeAudio_ApplyMasterVolume(reverbWetLeft, s_audio.masterVolumeLeft),
+		                      NativeAudio_ApplyMasterVolume(reverbWetRight, s_audio.masterVolumeRight));
+	}
 
 	*outLeft = (s16)NativeAudio_Clamp16(mixLeft);
 	*outRight = (s16)NativeAudio_Clamp16(mixRight);
@@ -3513,6 +3525,11 @@ u32 NativeAudio_SpuWrite(const u8 *addr, u32 size)
 
 	NativeAudio_UnlockOutput();
 
+#if defined(CTR_PS2)
+	// Copiar tambien a la RAM de la SPU2.
+	Ps2Spu2_Upload(s_audio.spu.memory, NATIVE_AUDIO_SPU_MEMSIZE, (u32)wptrOfs, size);
+#endif
+
 	return size;
 }
 
@@ -3607,6 +3624,39 @@ void NativeAudio_SpuSetVoiceAttr(SpuVoiceAttr *psxAttrib)
 		{
 			NativeAudio_UpdatePackedAdsrFromFields(voice);
 		}
+#if defined(CTR_PS2)
+		if (g_ps2Spu2Active)
+		{
+			// Mandar a la SPU2 los valores ya decodificados de esta voz.
+			u32 what = 0;
+			if (psxAttrib->mask & (SPU_VOICE_VOLL | SPU_VOICE_VOLR))
+			{
+				what |= PS2_SPU2_VOICE_VOLUME;
+			}
+			if (psxAttrib->mask & SPU_VOICE_PITCH)
+			{
+				what |= PS2_SPU2_VOICE_PITCH;
+			}
+			if (psxAttrib->mask & SPU_VOICE_WDSA)
+			{
+				what |= PS2_SPU2_VOICE_START;
+			}
+			if ((psxAttrib->mask & SPU_VOICE_LSAX) && (psxAttrib->loop_addr < NATIVE_AUDIO_SPU_MEMSIZE))
+			{
+				what |= PS2_SPU2_VOICE_LOOP;
+			}
+			if (psxAttrib->mask & (SPU_VOICE_ADSR_AR | SPU_VOICE_ADSR_DR | SPU_VOICE_ADSR_SR | SPU_VOICE_ADSR_RR | SPU_VOICE_ADSR_SL | SPU_VOICE_ADSR_AMODE |
+			                       SPU_VOICE_ADSR_SMODE | SPU_VOICE_ADSR_RMODE | SPU_VOICE_ADSR_ADSR1 | SPU_VOICE_ADSR_ADSR2))
+			{
+				what |= PS2_SPU2_VOICE_ADSR;
+			}
+			if (what != 0)
+			{
+				Ps2Spu2_VoiceUpdate(i, what, voice->attr.volume.left, voice->attr.volume.right, voice->attr.pitch, voice->attr.addr, voice->attr.loop_addr,
+				                    voice->attr.adsr1, voice->attr.adsr2);
+			}
+		}
+#endif
 	}
 
 	NativeAudio_UnlockOutput();
@@ -3621,6 +3671,10 @@ void NativeAudio_SpuSetKey(s32 on_off, u32 voice_bit)
 
 	NativeAudio_LockOutput();
 
+#if defined(CTR_PS2)
+	u32 ps2KeyOn = 0;
+	u32 ps2KeyOff = 0;
+#endif
 	for (int i = 0; i < NATIVE_AUDIO_SPU_VOICE_COUNT; i++)
 	{
 		if ((voice_bit & SPU_VOICECH(i)) == 0)
@@ -3629,6 +3683,16 @@ void NativeAudio_SpuSetKey(s32 on_off, u32 voice_bit)
 		}
 
 		struct NativeAudioVoice *voice = &s_audio.voices[i];
+#if defined(CTR_PS2)
+		if (on_off && !s_audio.muted && (voice->attr.addr < NATIVE_AUDIO_SPU_MEMSIZE))
+		{
+			ps2KeyOn |= SPU_VOICECH(i);
+		}
+		else
+		{
+			ps2KeyOff |= SPU_VOICECH(i);
+		}
+#endif
 		if (on_off && !s_audio.muted)
 		{
 			// Key On latches start addr as current block + restarts ADSR -penta3
@@ -3660,6 +3724,17 @@ void NativeAudio_SpuSetKey(s32 on_off, u32 voice_bit)
 	}
 
 	NativeAudio_UnlockOutput();
+
+#if defined(CTR_PS2)
+	if (ps2KeyOff != 0)
+	{
+		Ps2Spu2_KeyOff(ps2KeyOff);
+	}
+	if (ps2KeyOn != 0)
+	{
+		Ps2Spu2_KeyOn(ps2KeyOn);
+	}
+#endif
 }
 
 s32 NativeAudio_SpuSetReverb(s32 on_off)
@@ -3670,6 +3745,10 @@ s32 NativeAudio_SpuSetReverb(s32 on_off)
 	s_audio.reverbEnabled = on_off != 0;
 
 	NativeAudio_UnlockOutput();
+
+#if defined(CTR_PS2)
+	Ps2Spu2_SetReverbEnabled(on_off != 0);
+#endif
 
 	return oldState;
 }
@@ -3713,6 +3792,17 @@ s32 NativeAudio_SpuSetReverbModeParam(SpuReverbAttr *attr)
 
 	NativeAudio_UnlockOutput();
 
+#if defined(CTR_PS2)
+	if (mask & (SPU_REV_DEPTHL | SPU_REV_DEPTHR))
+	{
+		Ps2Spu2_SetReverbDepth(s_audio.reverbAttr.depth.left, s_audio.reverbAttr.depth.right);
+	}
+	if ((mask & (SPU_REV_MODE | SPU_REV_DELAYTIME | SPU_REV_FEEDBACK)) && (s_audio.reverbAttr.mode != SPU_REV_MODE_CHECK))
+	{
+		Ps2Spu2_SetReverbMode(NativeAudio_ReverbModeFromRaw(s_audio.reverbAttr.mode), s_audio.reverbAttr.delay, s_audio.reverbAttr.feedback);
+	}
+#endif
+
 	return SPU_SUCCESS;
 }
 
@@ -3725,6 +3815,10 @@ void NativeAudio_SpuSetReverbModeDepth(s16 left, s16 right)
 	s_audio.reverbAttr.mask |= SPU_REV_DEPTHL | SPU_REV_DEPTHR;
 
 	NativeAudio_UnlockOutput();
+
+#if defined(CTR_PS2)
+	Ps2Spu2_SetReverbDepth(left, right);
+#endif
 }
 
 u32 NativeAudio_SpuSetReverbVoice(s32 on_off, u32 voice_bit)
@@ -3750,6 +3844,10 @@ u32 NativeAudio_SpuSetReverbVoice(s32 on_off, u32 voice_bit)
 
 	NativeAudio_UnlockOutput();
 
+#if defined(CTR_PS2)
+	Ps2Spu2_SetReverbVoices(s_audio.reverbVoiceBits);
+#endif
+
 	return 0;
 }
 
@@ -3764,6 +3862,10 @@ void NativeAudio_SpuSetCommonMasterVolume(s16 left, s16 right)
 	s_audio.commonAttr.mask |= SPU_COMMON_MVOLL | SPU_COMMON_MVOLR;
 
 	NativeAudio_UnlockOutput();
+
+#if defined(CTR_PS2)
+	Ps2Spu2_SetMasterVolume(left, right);
+#endif
 }
 
 void NativeAudio_SpuSetCommonCDMix(s32 enabled)
