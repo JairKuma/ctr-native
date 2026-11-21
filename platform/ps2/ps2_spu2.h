@@ -38,6 +38,22 @@ void Ps2Spu2_Flush(void);
 // Desde la interrupcion de VBlank: despierta al hilo de envio.
 void Ps2Spu2_OnVBlankIsr(void);
 
+// --- Musica/voces XA en el chip (voces 0 y 1 del core 1) ----------------------
+// La XA de PS1 se reordena (sin descomprimir) en bloques ADPCM de la SPU2 y se
+// escribe en dos anillos (izquierdo/derecho) de la RAM de la SPU2.
+#define PS2_SPU2_XA_RING_BLOCKS 5760u // bloques de 16 bytes (28 muestras) por canal
+#define PS2_SPU2_XA_RING_BYTES  (PS2_SPU2_XA_RING_BLOCKS * 16u)
+#define PS2_SPU2_XA_BASE_LEFT   0x0A0000u
+#define PS2_SPU2_XA_BASE_RIGHT  0x0C0000u
+
+// Sube datos a una direccion de la RAM de la SPU2 (bytes, multiplo de 64).
+void Ps2Spu2_UploadRaw(unsigned int spuAddr, const unsigned char *data, unsigned int size);
+// Estas mandan al momento (no esperan al VBlank del juego).
+void Ps2Spu2_XaStart(unsigned int pitch, int volumeLeft, int volumeRight);
+void Ps2Spu2_XaPitch(unsigned int pitch);
+void Ps2Spu2_XaVolume(int volumeLeft, int volumeRight);
+void Ps2Spu2_XaStop(void);
+
 // Informe para el log (cada ~5 s). totalCycles = ciclos de la EE del periodo.
 void Ps2Spu2_Report(unsigned long long totalCycles);
 

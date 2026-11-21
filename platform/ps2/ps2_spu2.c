@@ -118,6 +118,8 @@ static unsigned int s_ps2Spu2StatUploadBytes = 0;
 static unsigned int s_ps2Spu2StatKeyOns = 0;
 static unsigned int s_ps2Spu2StatErrors = 0;
 static unsigned int s_ps2Spu2TotalUploadKB = 0;
+static unsigned int s_ps2Spu2StatXaBytes = 0;  // XA subida al chip
+static unsigned int s_ps2Spu2StatXaStarts = 0; // XA arrancadas en el chip
 
 static inline unsigned int Ps2Spu2_Now(void)
 {
@@ -422,6 +424,21 @@ int Ps2Spu2_Init(void)
 		Ps2Spu2_Push(SD_BATCH_SETPARAM, Ps2Spu2_VoiceEntry(i, SD_VPARAM_PITCH), 0);
 		Ps2Spu2_Push(SD_BATCH_SETADDR, Ps2Spu2_VoiceEntry(i, SD_VADDR_SSA), PS2_SPU2_RAM_BASE);
 	}
+	// Core 1, voces 0 y 1 (XA): calladas, a la salida seca, sin eco.
+	Ps2Spu2_Push(SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_KOFF, 0x3u);
+	Ps2Spu2_Push(SD_BATCH_SETPARAM, (unsigned short)(SD_VOICE(PS2_SPU2_CORE1, 0) | SD_VPARAM_VOLL), 0);
+	Ps2Spu2_Push(SD_BATCH_SETPARAM, (unsigned short)(SD_VOICE(PS2_SPU2_CORE1, 0) | SD_VPARAM_VOLR), 0);
+	Ps2Spu2_Push(SD_BATCH_SETPARAM, (unsigned short)(SD_VOICE(PS2_SPU2_CORE1, 1) | SD_VPARAM_VOLL), 0);
+	Ps2Spu2_Push(SD_BATCH_SETPARAM, (unsigned short)(SD_VOICE(PS2_SPU2_CORE1, 1) | SD_VPARAM_VOLR), 0);
+	Ps2Spu2_Push(SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_PMON, 0);
+	Ps2Spu2_Push(SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_NON, 0);
+	Ps2Spu2_Push(SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_VMIXL, PS2_SPU2_ALL_VOICES);
+	Ps2Spu2_Push(SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_VMIXR, PS2_SPU2_ALL_VOICES);
+	Ps2Spu2_Push(SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_VMIXEL, 0);
+	Ps2Spu2_Push(SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_VMIXER, 0);
+	// Mezcla del core 1: voces y entrada PCM (audsrv) a la salida, y la salida del
+	// core 0 ("entrada externa") tambien. (Es lo que deja la libsd al iniciarse.)
+	Ps2Spu2_Push(SD_BATCH_SETPARAM, PS2_SPU2_CORE1 | SD_PARAM_MMIX, 0xFFC);
 	// La salida del core 0 entra en el core 1 por su "entrada externa".
 	Ps2Spu2_Push(SD_BATCH_SETPARAM, PS2_SPU2_CORE1 | SD_PARAM_AVOLL, 0x7FFF);
 	Ps2Spu2_Push(SD_BATCH_SETPARAM, PS2_SPU2_CORE1 | SD_PARAM_AVOLR, 0x7FFF);
@@ -566,6 +583,135 @@ void Ps2Spu2_Upload(const unsigned char *memory, unsigned int memorySize, unsign
 
 	g_ps2ProfSpu2Cycles += (unsigned int)(Ps2Spu2_Now() - t0);
 	Ps2Spu2_LockGive();
+}
+
+// --- XA en el chip: voces 0 (izquierda) y 1 (derecha) del core 1 --------------
+// El core 1 lo usa audsrv solo para su entrada PCM; sus 24 voces estan libres.
+// Estos envios no esperan a la cola de VBlank: son de otro core y no importa su
+// orden respecto a las voces del juego.
+
+void Ps2Spu2_UploadRaw(unsigned int spuAddr, const unsigned char *data, unsigned int size)
+{
+	if (!g_ps2Spu2Active || (data == NULL) || (size == 0))
+	{
+		return;
+	}
+	const unsigned int t0 = Ps2Spu2_Now();
+	Ps2Spu2_LockTake();
+	CtrSpu2Header *header = (CtrSpu2Header *)s_ps2Spu2Send;
+	unsigned int pos = 0;
+	while (pos < size)
+	{
+		unsigned int chunk = size - pos;
+		if (chunk > CTRSPU2_UPLOAD_CHUNK)
+		{
+			chunk = CTRSPU2_UPLOAD_CHUNK;
+		}
+		memset(header, 0, sizeof(*header));
+		header->count = chunk;
+		header->spuAddr = spuAddr + pos;
+		memcpy(s_ps2Spu2Send + CTRSPU2_HEADER_BYTES, data + pos, chunk);
+		const int result = Ps2Spu2_Call(CTRSPU2_CMD_UPLOAD, CTRSPU2_HEADER_BYTES + (int)chunk);
+		if (result != (int)chunk)
+		{
+			s_ps2Spu2StatErrors++;
+		}
+		s_ps2Spu2StatXaBytes += chunk;
+		pos += chunk;
+	}
+	Ps2Spu2_LockGive();
+	g_ps2ProfSpu2Cycles += (unsigned int)(Ps2Spu2_Now() - t0);
+}
+
+// Manda una lista corta al momento (con el cerrojo, sin vaciar la cola).
+static void Ps2Spu2_SendNow(const sceSdBatch *batch, int count)
+{
+	if (!g_ps2Spu2Active || (count <= 0))
+	{
+		return;
+	}
+	const unsigned int t0 = Ps2Spu2_Now();
+	Ps2Spu2_LockTake();
+	CtrSpu2Header *header = (CtrSpu2Header *)s_ps2Spu2Send;
+	memset(header, 0, sizeof(*header));
+	header->count = (unsigned int)count;
+	memcpy(s_ps2Spu2Send + CTRSPU2_HEADER_BYTES, batch, (size_t)count * sizeof(sceSdBatch));
+	Ps2Spu2_Call(CTRSPU2_CMD_BATCH, CTRSPU2_HEADER_BYTES + count * (int)sizeof(sceSdBatch));
+	Ps2Spu2_LockGive();
+	g_ps2ProfSpu2Cycles += (unsigned int)(Ps2Spu2_Now() - t0);
+}
+
+#define PS2_SPU2_XA_VOICE_L 0
+#define PS2_SPU2_XA_VOICE_R 1
+#define PS2_SPU2_XA_VOICE_BITS 0x3u
+
+static void Ps2Spu2_SetEntry(sceSdBatch *b, unsigned short func, unsigned short entry, unsigned int value)
+{
+	b->func = func;
+	b->entry = entry;
+	b->value = value;
+}
+
+static unsigned short Ps2Spu2_Core1Voice(int voice, unsigned short reg)
+{
+	return (unsigned short)(SD_VOICE(PS2_SPU2_CORE1, voice) | reg);
+}
+
+void Ps2Spu2_XaStart(unsigned int pitch, int volumeLeft, int volumeRight)
+{
+	sceSdBatch b[24];
+	int n = 0;
+	if (pitch > 0x3FFF)
+	{
+		pitch = 0x3FFF;
+	}
+	// Las dos voces: direccion del anillo, envolvente fija al maximo, tono y volumen.
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETADDR, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_L, SD_VADDR_SSA), PS2_SPU2_XA_BASE_LEFT);
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETADDR, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_R, SD_VADDR_SSA), PS2_SPU2_XA_BASE_RIGHT);
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETADDR, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_L, SD_VADDR_LSAX), PS2_SPU2_XA_BASE_LEFT);
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETADDR, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_R, SD_VADDR_LSAX), PS2_SPU2_XA_BASE_RIGHT);
+	for (int v = 0; v < 2; v++)
+	{
+		Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(v, SD_VPARAM_ADSR1), 0x00FF); // ataque instantaneo, nivel maximo
+		Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(v, SD_VPARAM_ADSR2), 0x1FC0); // se mantiene; corte rapido
+		Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(v, SD_VPARAM_PITCH), pitch);
+	}
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_L, SD_VPARAM_VOLL), Ps2Spu2_ClampVolume(volumeLeft));
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_L, SD_VPARAM_VOLR), 0);
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_R, SD_VPARAM_VOLL), 0);
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_R, SD_VPARAM_VOLR), Ps2Spu2_ClampVolume(volumeRight));
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_KON, PS2_SPU2_XA_VOICE_BITS);
+	Ps2Spu2_SendNow(b, n);
+	s_ps2Spu2StatXaStarts++;
+}
+
+void Ps2Spu2_XaPitch(unsigned int pitch)
+{
+	sceSdBatch b[2];
+	if (pitch > 0x3FFF)
+	{
+		pitch = 0x3FFF;
+	}
+	Ps2Spu2_SetEntry(&b[0], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_L, SD_VPARAM_PITCH), pitch);
+	Ps2Spu2_SetEntry(&b[1], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_R, SD_VPARAM_PITCH), pitch);
+	Ps2Spu2_SendNow(b, 2);
+}
+
+void Ps2Spu2_XaVolume(int volumeLeft, int volumeRight)
+{
+	sceSdBatch b[2];
+	Ps2Spu2_SetEntry(&b[0], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_L, SD_VPARAM_VOLL), Ps2Spu2_ClampVolume(volumeLeft));
+	Ps2Spu2_SetEntry(&b[1], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_R, SD_VPARAM_VOLR), Ps2Spu2_ClampVolume(volumeRight));
+	Ps2Spu2_SendNow(b, 2);
+}
+
+void Ps2Spu2_XaStop(void)
+{
+	sceSdBatch b[3];
+	Ps2Spu2_SetEntry(&b[0], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_L, SD_VPARAM_VOLL), 0);
+	Ps2Spu2_SetEntry(&b[1], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(PS2_SPU2_XA_VOICE_R, SD_VPARAM_VOLR), 0);
+	Ps2Spu2_SetEntry(&b[2], SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_KOFF, PS2_SPU2_XA_VOICE_BITS);
+	Ps2Spu2_SendNow(b, 3);
 }
 
 void Ps2Spu2_VoiceUpdate(int voice, unsigned int what, int volumeLeft, int volumeRight, unsigned int pitch, unsigned int startAddr, unsigned int loopAddr,
@@ -717,6 +863,12 @@ void Ps2Spu2_Report(unsigned long long totalCycles)
 	       s_ps2Spu2StatFlushes, s_ps2Spu2StatEntries, s_ps2Spu2StatKeyOns, s_ps2Spu2StatMaxBacklog, s_ps2Spu2StatUploadBytes / 1024u,
 	       s_ps2Spu2TotalUploadKB, s_ps2Spu2ReverbMode, s_ps2Spu2ReverbEnabled ? "on" : "off", s_ps2Spu2StatErrors, pct);
 	s_ps2Spu2StatMaxBacklog = 0;
+	if (s_ps2Spu2StatXaStarts || s_ps2Spu2StatXaBytes)
+	{
+		printf("[CTR PS2] spu2 xa: arrancadas %u | subido %u KB\n", s_ps2Spu2StatXaStarts, s_ps2Spu2StatXaBytes / 1024u);
+	}
+	s_ps2Spu2StatXaStarts = 0;
+	s_ps2Spu2StatXaBytes = 0;
 	s_ps2Spu2StatFlushes = 0;
 	s_ps2Spu2StatEntries = 0;
 	s_ps2Spu2StatUploadBytes = 0;

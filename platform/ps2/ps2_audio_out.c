@@ -392,6 +392,9 @@ internal void Ps2AudioOut_Service(void)
 	const unsigned long long profCdStart = g_ps2ProfCdCycles;
 	s_ps2AudioInPump = 1;
 
+	// XA en el chip SPU2: leer por adelantado y subir los bloques (native_audio.c).
+	Ps2XaHw_PumpNoLock();
+
 	// Presupuesto: se gana PS2_AUDIO_CPU_BUDGET_PERCENT % del tiempo pasado.
 	{
 		const u32 nowBudget = Ps2Prof_Now();
