@@ -299,11 +299,17 @@ static void Ps2Spu2_SenderThread(void *arg)
 		{
 			s_ps2Spu2StatMaxBacklog = backlog;
 		}
-		// Normalmente una lista por VBlank; si se acumulan muchas, las que sobran.
+		// Normalmente una lista por VBlank. Si se acumulan, se manda alguna de mas
+		// para volver a ir casi al dia (si no, el retraso se quedaba fijo en ~6
+		// VBlanks = 100 ms y los efectos sonaban tarde).
 		u32 toSend = 0;
 		if (backlog > PS2_SPU2_MAX_BACKLOG)
 		{
-			toSend = backlog - PS2_SPU2_MAX_BACKLOG + 1u;
+			toSend = backlog - 2u; // tras una carga: casi todo de golpe
+		}
+		else if (backlog >= 4u)
+		{
+			toSend = 2u;
 		}
 		else if (backlog > 0)
 		{
