@@ -96,6 +96,12 @@
 // momento sin tocar el bus, igual que si no hubiera partidas.
 #define PS2_NO_MEMCARD_ROOT "rom0:/CTRNATIVE"
 
+// 1 = las voces y el eco del juego suenan en el chip SPU2 de la PS2 (ctrspu2.irx
+//     + platform/ps2/ps2_spu2.c). Gasta mucha menos CPU.
+// 0 = se emulan por software como antes (para comparar). Si ctrspu2.irx falla
+//     al cargar, se usa el software automaticamente.
+#define PS2_USE_SPU2 1
+
 // --- Colores de diagnostico (consola real, sin texto) ------------------------
 // La pantalla muestra el color del ULTIMO paso completado; si se cuelga, el
 // fallo esta en el paso siguiente:
@@ -106,6 +112,7 @@
 //   amarillo  rom0:XPADMAN cargado
 //   celeste   rom0:LIBSD cargado
 //   blanco    audsrv.irx cargado
+//   turquesa  ctrspu2.irx cargado (sonido por el chip SPU2)
 //   gris      audsrv iniciado; buscando CTR_U.BIN
 //   verde     CTR_U.BIN encontrado; arrancando el juego
 //   rojo      CTR_U.BIN NO encontrado (se queda en rojo)
@@ -114,6 +121,10 @@ void Ps2Renderer_DebugScreen(u8 r, u8 g, u8 b);
 // audsrv.irx va incrustado en el ELF (Makefile.ps2 lo genera con bin2c).
 extern unsigned char audsrv_irx[];
 extern unsigned int size_audsrv_irx;
+// ctrspu2.irx (iop/ctrspu2): manda las voces del juego al chip SPU2.
+extern unsigned char ctrspu2_irx[];
+extern unsigned int size_ctrspu2_irx;
+static int s_ps2Spu2ModuleLoaded = 0;
 
 // Carga los modulos del IOP: memory card, mandos y audio. Los de rom0: vienen
 // en la BIOS de cualquier PS2; audsrv.irx (del PS2SDK) va dentro del ELF.
@@ -164,6 +175,18 @@ static void Ps2Main_LoadIopModules(void)
 	const int audsrvId = SifExecModuleBuffer(audsrv_irx, size_audsrv_irx, 0, NULL, &moduleResult);
 	printf("[CTR PS2] Load audsrv.irx: %s (%d, %d)\n", (audsrvId >= 0) ? "ok" : "FAILED", audsrvId, moduleResult);
 	Ps2Renderer_DebugScreen(0xff, 0xff, 0xff); // blanco
+
+#if PS2_USE_SPU2
+	moduleResult = 0;
+	const int spu2Id = SifExecModuleBuffer(ctrspu2_irx, size_ctrspu2_irx, 0, NULL, &moduleResult);
+	// moduleResult 0 = el modulo se queda residente (todo bien).
+	s_ps2Spu2ModuleLoaded = (spu2Id >= 0) && (moduleResult == 0);
+	printf("[CTR PS2] Load ctrspu2.irx: %s (%d, %d)\n", s_ps2Spu2ModuleLoaded ? "ok" : "FAILED", spu2Id, moduleResult);
+	if (s_ps2Spu2ModuleLoaded)
+	{
+		Ps2Renderer_DebugScreen(0x00, 0xc0, 0xa0); // turquesa
+	}
+#endif
 }
 
 // Comprueba si existe <dir>/assets/ctr-u.bin o <dir>/assets/BIGFILE.BIG.
@@ -294,6 +317,11 @@ int main(int argc, char *argv[])
 
 	Ps2Main_LoadIopModules();
 	Ps2AudioOut_Init();
+	// Despues de audsrv (que inicia la libsd): preparar el chip SPU2.
+	if (s_ps2Spu2ModuleLoaded && !Ps2Spu2_Init())
+	{
+		printf("[CTR PS2] spu2: no disponible, voces emuladas por software\n");
+	}
 	Ps2Renderer_DebugScreen(0x80, 0x80, 0x80); // gris
 
 	printf("[CTR PS2] CTR Native %s starting...\n", CTR_NATIVE_VERSION);

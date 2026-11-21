@@ -6,7 +6,7 @@
 # Genera ctr_ps2.elf. El build de PC (CMake) no se ve afectado.
 
 EE_BIN = ctr_ps2.elf
-EE_OBJS = main_ps2.o platform/ps2/ps2_cd.o audsrv_irx.o
+EE_OBJS = main_ps2.o platform/ps2/ps2_cd.o platform/ps2/ps2_spu2.o audsrv_irx.o ctrspu2_irx.o
 
 EE_INCS = -I. -Iinclude -Iplatform/ps2/include -I$(GSKIT)/include
 
@@ -28,8 +28,18 @@ all: $(EE_BIN)
 audsrv_irx.c: $(PS2SDK)/iop/irx/audsrv.irx
 	$(PS2SDK)/bin/bin2c $< $@ audsrv_irx
 
+# Modulo propio del IOP (iop/ctrspu2): manda el sonido al chip SPU2.
+iop/ctrspu2/ctrspu2.irx: iop/ctrspu2/ctrspu2.c iop/ctrspu2/ctrspu2_rpc.h iop/ctrspu2/imports.lst iop/ctrspu2/irx_imports.h
+	$(MAKE) -C iop/ctrspu2
+
+ctrspu2_irx.c: iop/ctrspu2/ctrspu2.irx
+	$(PS2SDK)/bin/bin2c $< $@ ctrspu2_irx
+
+platform/ps2/ps2_spu2.o: platform/ps2/ps2_spu2.h iop/ctrspu2/ctrspu2_rpc.h
+
 clean:
-	rm -f $(EE_BIN) $(EE_OBJS) audsrv_irx.c
+	rm -f $(EE_BIN) $(EE_OBJS) audsrv_irx.c ctrspu2_irx.c
+	$(MAKE) -C iop/ctrspu2 clean
 
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal
