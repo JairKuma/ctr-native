@@ -10,6 +10,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(CTR_PS2)
+// NOTE: PS2 build. Sonido por el chip SPU2 (ver platform/ps2/ps2_spu2.c).
+#include "platform/ps2/ps2_spu2.h"
+extern u32 g_ps2XaMixFrames;   // contadores del informe (definidos mas abajo)
+extern u32 g_ps2XaStallFrames;
+#endif
+
 #define NATIVE_AUDIO_SAMPLE_RATE             44100
 #define NATIVE_AUDIO_CHANNELS                2
 #define NATIVE_AUDIO_SPU_VOICE_COUNT         24
@@ -1820,8 +1827,14 @@ internal int NativeAudio_VoiceStreamAdvanceBlock(struct NativeAudioVoice *voice)
 	return !ended;
 }
 
+#if defined(CTR_PS2)
+internal void Ps2XaHw_Stop(void);
+#endif
 internal void NativeAudio_CloseXANoLock(void)
 {
+#if defined(CTR_PS2)
+	Ps2XaHw_Stop();
+#endif
 	memset(&s_audio.xa, 0, sizeof(s_audio.xa));
 	free(s_audio.xaStream.sectors);
 	memset(&s_audio.xaStream, 0, sizeof(s_audio.xaStream));
@@ -2577,6 +2590,128 @@ internal void NativeAudio_XaStreamStartNoLock(struct NativeAudioXaPreparedStream
 // con otra lectura: NativeAudio_MixFrame no avanza la XA (pausa, sin saltos).
 global_variable int g_ps2XaStalled = 0;
 int NativeDiscImage_Ps2ReadXaSlotUserSector(u32 lba, u8 *dst);
+
+// --- XA en el chip SPU2 ---------------------------------------------------------
+// La XA de PS1 (ADPCM de 4 bits en grupos de 128 bytes) usa los mismos filtros y
+// el mismo formato de muestra que el ADPCM de la SPU2: cada "unidad" de 28
+// muestras se REORDENA (sin descomprimir) en un bloque de 16 bytes de la SPU2.
+// Los bloques van a dos anillos en la RAM de la SPU2 que tocan las voces 0
+// (izquierda) y 1 (derecha) del core 1, en bucle. Asi la CPU no descomprime ni
+// remuestrea la XA (antes 15-21% de CPU con musica estereo).
+//
+// El juego sigue usando la posicion de la XA (fin de pista, movimiento de la
+// boca...): el "reloj" de software sigue avanzando igual, pero sin mezclar. El
+// pico para la boca se calcula al leer cada sector (tabla por tramos de 128).
+//
+// Se lee por adelantado ~2 s. Si el lector va tan lento que se acaba lo leido,
+// las voces se paran (tono 0) y el reloj tambien, y siguen juntos despues.
+#define PS2_XAHW_PEAK_BUCKETS 2048u // tramos de 128 frames (~7 s a 37800 Hz)
+struct Ps2XaHw
+{
+	int active;      // la XA actual suena en el chip
+	int paused;      // voces paradas esperando datos
+	int ended;       // ya se ha escrito toda la pista
+	int stereo;
+	int rate;
+	u32 pitch;
+	u32 writeBlock;  // bloques escritos por canal (sin envolver)
+	u32 dirtyStart;  // bloques pendientes de subir: [dirtyStart, writeBlock)
+	u64 writtenFrames;
+	int sentVolL;
+	int sentVolR;
+	u32 peakBucket;  // ultimo tramo con pico calculado
+	u32 stallFrames; // para el informe
+	u32 pauses;
+	u32 sectors;
+	int filling;     // leyendo la XA ahora mismo (no volver a entrar)
+};
+global_variable struct Ps2XaHw s_ps2XaHw;
+global_variable u8 s_ps2XaHwRingL[PS2_SPU2_XA_RING_BYTES] __attribute__((aligned(64)));
+global_variable u8 s_ps2XaHwRingR[PS2_SPU2_XA_RING_BYTES] __attribute__((aligned(64)));
+global_variable u16 s_ps2XaHwPeak[PS2_XAHW_PEAK_BUCKETS];
+
+internal void Ps2XaHw_PutBlock(u8 *ring, u32 blockIndex, u8 param, const u8 *data, int unitByte, int highNibble)
+{
+	const u32 idx = blockIndex % PS2_SPU2_XA_RING_BLOCKS;
+	u8 *dst = &ring[idx * 16u];
+	int filter = (param >> 4) & 0xf;
+	if (filter > 4)
+	{
+		filter = 4;
+	}
+	dst[0] = (u8)((param & 0x0f) | (filter << 4));
+	// Bucle del anillo: el primer bloque marca el inicio, el ultimo vuelve a el.
+	dst[1] = (idx == 0) ? 0x04 : ((idx == PS2_SPU2_XA_RING_BLOCKS - 1u) ? 0x03 : 0x00);
+	if (data == NULL)
+	{
+		memset(&dst[2], 0, 14); // silencio
+		return;
+	}
+	for (int k = 0; k < 14; k++)
+	{
+		const u8 a = data[(2 * k) * 4 + unitByte];
+		const u8 b = data[(2 * k + 1) * 4 + unitByte];
+		const u8 lo = highNibble ? (u8)(a >> 4) : (u8)(a & 0x0f);
+		const u8 hi = highNibble ? (u8)(b >> 4) : (u8)(b & 0x0f);
+		dst[2 + k] = (u8)(lo | (hi << 4));
+	}
+}
+
+// Reordena un sector de audio XA en bloques de la SPU2 (los dos anillos).
+internal void Ps2XaHw_RepackSector(const u8 *sector, int sectorBase)
+{
+	for (int frame = 0; frame < XA_FRAMES_PER_SECTOR; frame++)
+	{
+		const int frameOff = sectorBase + XA_SUBHEADER_SIZE + frame * XA_FRAME_SIZE;
+		const u8 *data = &sector[frameOff + 16];
+		for (int su = 0; su < XA_SUBFRAMES_PER_FRAME; su++)
+		{
+			const u8 param = sector[frameOff + 4 + su];
+			if (s_ps2XaHw.stereo)
+			{
+				// Unidades pares = izquierda, impares = derecha.
+				u8 *ring = (su & 1) ? s_ps2XaHwRingR : s_ps2XaHwRingL;
+				Ps2XaHw_PutBlock(ring, s_ps2XaHw.writeBlock + (u32)(su >> 1), param, data, su >> 1, su & 1);
+			}
+			else
+			{
+				Ps2XaHw_PutBlock(s_ps2XaHwRingL, s_ps2XaHw.writeBlock + (u32)su, param, data, su >> 1, su & 1);
+				Ps2XaHw_PutBlock(s_ps2XaHwRingR, s_ps2XaHw.writeBlock + (u32)su, param, data, su >> 1, su & 1);
+			}
+		}
+		s_ps2XaHw.writeBlock += s_ps2XaHw.stereo ? 4u : 8u;
+	}
+}
+
+// Picos para el movimiento de la boca (tramos de 128 frames).
+internal void Ps2XaHw_AddPeaks(u64 firstFrame, const s16 *samples, int frames, int channels)
+{
+	for (int f = 0; f < frames; f++)
+	{
+		const u32 bucket = (u32)((firstFrame + (u64)f) >> 7);
+		if (bucket != s_ps2XaHw.peakBucket)
+		{
+			s_ps2XaHw.peakBucket = bucket;
+			s_ps2XaHwPeak[bucket & (PS2_XAHW_PEAK_BUCKETS - 1u)] = 0;
+		}
+		int v = samples[f * channels];
+		v = (v < 0) ? -v : v;
+		if (channels > 1)
+		{
+			int r = samples[f * channels + 1];
+			r = (r < 0) ? -r : r;
+			if (r > v)
+			{
+				v = r;
+			}
+		}
+		u16 *slot = &s_ps2XaHwPeak[bucket & (PS2_XAHW_PEAK_BUCKETS - 1u)];
+		if ((u16)v > *slot)
+		{
+			*slot = (u16)v;
+		}
+	}
+}
 #endif
 
 internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
@@ -2689,9 +2824,240 @@ internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 		}
 	}
 
+#if defined(CTR_PS2)
+	if (s_ps2XaHw.active)
+	{
+		// XA en el chip: reordenar este sector a los anillos de la SPU2 y apuntar
+		// sus picos (para la boca). El PCM decodificado no se usa para sonar.
+		Ps2XaHw_RepackSector(src, xs->sectorBase);
+		Ps2XaHw_AddPeaks(xs->decodedFrames, tmp.samples, frames, (xs->numChannels == 2) ? 2 : 1);
+		s_ps2XaHw.writtenFrames = xs->decodedFrames + (u64)frames;
+		s_ps2XaHw.sectors++;
+	}
+#endif
 	xs->decodedFrames += (u64)frames;
 	return 1;
 }
+
+#if defined(CTR_PS2)
+#define PS2_XAHW_AHEAD_SECONDS_X10 20 // leer por adelantado (2,0 s)
+#define PS2_XAHW_LOW_MS 300            // si queda menos de esto leido: pausa
+#define PS2_XAHW_RESUME_MS 600         // y se sigue al tener esto
+#define PS2_XAHW_PREFILL_MS 500        // antes de empezar a sonar
+
+internal u64 Ps2XaHw_MsToFrames(int ms)
+{
+	return ((u64)(u32)s_ps2XaHw.rate * (u32)ms) / 1000u;
+}
+
+internal u64 Ps2XaHw_RingFrames(void)
+{
+	return (u64)PS2_SPU2_XA_RING_BLOCKS * XA_SAMPLES_PER_SOUND_UNIT;
+}
+
+internal int Ps2XaHw_VoiceVolume(int xaVolume, int master)
+{
+	if (!s_audio.cdMixEnabled || (xaVolume <= 0))
+	{
+		return 0;
+	}
+	if (master < 0)
+	{
+		master = 0;
+	}
+	if (master > 0x3fff)
+	{
+		master = 0x3fff;
+	}
+	// XA 0x7FFF + maestro 0x3FFF = volumen completo de la voz (0x3FFF).
+	int v = (int)(((u32)xaVolume * (u32)master) >> 15);
+	return (v > 0x3fff) ? 0x3fff : v;
+}
+
+// Sube al chip los bloques escritos desde la ultima vez.
+internal void Ps2XaHw_UploadDirty(void)
+{
+	u32 start = s_ps2XaHw.dirtyStart;
+	const u32 end = s_ps2XaHw.writeBlock;
+	while (start < end)
+	{
+		const u32 idx = start % PS2_SPU2_XA_RING_BLOCKS;
+		u32 count = end - start;
+		if (count > PS2_SPU2_XA_RING_BLOCKS - idx)
+		{
+			count = PS2_SPU2_XA_RING_BLOCKS - idx;
+		}
+		Ps2Spu2_UploadRaw(PS2_SPU2_XA_BASE_LEFT + idx * 16u, &s_ps2XaHwRingL[idx * 16u], count * 16u);
+		Ps2Spu2_UploadRaw(PS2_SPU2_XA_BASE_RIGHT + idx * 16u, &s_ps2XaHwRingR[idx * 16u], count * 16u);
+		start += count;
+	}
+	s_ps2XaHw.dirtyStart = end;
+}
+
+internal void Ps2XaHw_Stop(void)
+{
+	if (!s_ps2XaHw.active)
+	{
+		return;
+	}
+	Ps2Spu2_XaStop();
+	s_ps2XaHw.active = 0;
+}
+
+// Fin de la pista: unos bloques de silencio detras para que no suene nada viejo
+// mientras llega la orden de parar.
+internal void Ps2XaHw_MarkEnded(void)
+{
+	if (s_ps2XaHw.ended)
+	{
+		return;
+	}
+	s_ps2XaHw.ended = 1;
+	const u32 silenceBlocks = 288; // multiplo de 72 y 144 (~0,2 s)
+	for (u32 i = 0; i < silenceBlocks; i++)
+	{
+		Ps2XaHw_PutBlock(s_ps2XaHwRingL, s_ps2XaHw.writeBlock + i, 0, NULL, 0, 0);
+		Ps2XaHw_PutBlock(s_ps2XaHwRingR, s_ps2XaHw.writeBlock + i, 0, NULL, 0, 0);
+	}
+	s_ps2XaHw.writeBlock += silenceBlocks;
+}
+
+internal int Ps2XaHw_TrackFinishedReading(void)
+{
+	const struct NativeAudioXaStream *xs = &s_audio.xaStream;
+	if (xs->lazy)
+	{
+		return (xs->scanSector >= xs->scanEnd) && !g_ps2XaStalled;
+	}
+	return xs->nextSector >= xs->sectorCount;
+}
+
+// Lee por adelantado (lo llama el audio en cada VBlank, ps2_audio_out.c).
+internal void Ps2XaHw_PumpNoLock(void)
+{
+	// Mientras se lee la XA, el disco genera audio (y vuelve aqui): no entrar.
+	if (!s_ps2XaHw.active || s_ps2XaHw.filling)
+	{
+		return;
+	}
+	if (!s_audio.xa.active || (s_audio.xaStream.sectors == NULL))
+	{
+		Ps2XaHw_Stop();
+		return;
+	}
+
+	// Volumen (fundidos, volumen de la musica en opciones...).
+	const int volL = Ps2XaHw_VoiceVolume(s_audio.xa.volumeLeft, s_audio.masterVolumeLeft);
+	const int volR = Ps2XaHw_VoiceVolume(s_audio.xa.volumeRight, s_audio.masterVolumeRight);
+	if ((volL != s_ps2XaHw.sentVolL) || (volR != s_ps2XaHw.sentVolR))
+	{
+		Ps2Spu2_XaVolume(volL, volR);
+		s_ps2XaHw.sentVolL = volL;
+		s_ps2XaHw.sentVolR = volR;
+	}
+
+	const u64 pos = s_audio.xa.positionFp >> NATIVE_AUDIO_FP_SHIFT;
+	const u64 target = pos + ((u64)(u32)s_audio.xa.sampleRate * PS2_XAHW_AHEAD_SECONDS_X10) / 10u;
+	const u64 ringFrames = Ps2XaHw_RingFrames();
+	const u64 maxAhead = (ringFrames > Ps2XaHw_MsToFrames(1000)) ? (ringFrames - Ps2XaHw_MsToFrames(1000)) : 0;
+	int budget = 6; // sectores como mucho por llamada (no frenar el fotograma)
+	s_ps2XaHw.filling = 1;
+	while (!s_ps2XaHw.ended && (budget-- > 0) && (s_ps2XaHw.writtenFrames < target) && (s_ps2XaHw.writtenFrames < pos + maxAhead))
+	{
+		g_ps2XaStalled = 0;
+		if (!NativeAudio_XaStreamDecodeNextSectorNoLock())
+		{
+			if (Ps2XaHw_TrackFinishedReading())
+			{
+				Ps2XaHw_MarkEnded();
+			}
+			break;
+		}
+	}
+	s_ps2XaHw.filling = 0;
+	Ps2XaHw_UploadDirty();
+}
+
+// Arranca la XA recien preparada en el chip (si se puede).
+internal void Ps2XaHw_StartNoLock(void)
+{
+	memset(&s_ps2XaHw, 0, sizeof(s_ps2XaHw));
+	if (!g_ps2Spu2Active || (s_audio.xaStream.sectors == NULL) || (s_audio.xa.sampleRate <= 0))
+	{
+		return;
+	}
+	s_ps2XaHw.active = 1;
+	s_ps2XaHw.stereo = (s_audio.xaStream.numChannels == 2);
+	s_ps2XaHw.rate = s_audio.xa.sampleRate;
+	s_ps2XaHw.pitch = (u32)(((u32)s_audio.xa.sampleRate * 4096u + 24000u) / 48000u);
+	s_ps2XaHw.peakBucket = 0xffffffffu;
+	s_ps2XaHw.sentVolL = -1;
+	s_ps2XaHw.sentVolR = -1;
+
+	// Llenar un poco antes de empezar a sonar.
+	const u64 prefill = Ps2XaHw_MsToFrames(PS2_XAHW_PREFILL_MS);
+	s_ps2XaHw.filling = 1;
+	for (int i = 0; (i < 40) && !s_ps2XaHw.ended && (s_ps2XaHw.writtenFrames < prefill); i++)
+	{
+		g_ps2XaStalled = 0;
+		if (!NativeAudio_XaStreamDecodeNextSectorNoLock())
+		{
+			if (Ps2XaHw_TrackFinishedReading())
+			{
+				Ps2XaHw_MarkEnded();
+			}
+			break;
+		}
+	}
+	s_ps2XaHw.filling = 0;
+	Ps2XaHw_UploadDirty();
+
+	const int volL = Ps2XaHw_VoiceVolume(s_audio.xa.volumeLeft, s_audio.masterVolumeLeft);
+	const int volR = Ps2XaHw_VoiceVolume(s_audio.xa.volumeRight, s_audio.masterVolumeRight);
+	Ps2Spu2_XaStart(s_ps2XaHw.pitch, volL, volR);
+	s_ps2XaHw.sentVolL = volL;
+	s_ps2XaHw.sentVolR = volR;
+}
+
+// En cada frame de audio con XA en el chip: avanzar el reloj (o esperar datos).
+internal void Ps2XaHw_MixStepNoLock(void)
+{
+	if (s_ps2XaHw.filling && (s_ps2XaHw.sentVolL < 0))
+	{
+		return; // aun preparando el arranque: el reloj no corre
+	}
+	const u64 pos = s_audio.xa.positionFp >> NATIVE_AUDIO_FP_SHIFT;
+	if (!s_ps2XaHw.ended && (s_ps2XaHw.writtenFrames < pos + Ps2XaHw_MsToFrames(PS2_XAHW_LOW_MS)))
+	{
+		if (!s_ps2XaHw.paused)
+		{
+			Ps2Spu2_XaPitch(0); // parar las voces hasta tener datos
+			s_ps2XaHw.paused = 1;
+			s_ps2XaHw.pauses++;
+		}
+		s_ps2XaHw.stallFrames++;
+		g_ps2XaStallFrames++;
+		return;
+	}
+	if (s_ps2XaHw.paused && (s_ps2XaHw.ended || (s_ps2XaHw.writtenFrames >= pos + Ps2XaHw_MsToFrames(PS2_XAHW_RESUME_MS))))
+	{
+		Ps2Spu2_XaPitch(s_ps2XaHw.pitch);
+		s_ps2XaHw.paused = 0;
+	}
+	if (s_ps2XaHw.paused)
+	{
+		s_ps2XaHw.stallFrames++;
+		g_ps2XaStallFrames++;
+		return;
+	}
+	g_ps2XaMixFrames++;
+	NativeAudio_AdvanceXAOutputFrameNoLock();
+	if (!s_audio.xa.active)
+	{
+		Ps2XaHw_Stop(); // fin de la pista
+	}
+}
+#endif
 
 internal void NativeAudio_MixSample(int *dstLeft, int *dstRight, int sampleLeft, int sampleRight)
 {
@@ -3234,6 +3600,13 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 		{
 			s_audio.xa.active = 0;
 		}
+#if defined(CTR_PS2)
+		else if (s_ps2XaHw.active)
+		{
+			// La XA suena en el chip SPU2: aqui solo avanza su reloj.
+			Ps2XaHw_MixStepNoLock();
+		}
+#endif
 		else if (!s_audio.cdMixEnabled)
 		{
 #if defined(CTR_PS2)
@@ -4135,6 +4508,7 @@ int NativeAudio_PlayXATrack(int categoryID, int xaID, int volumeLeft, int volume
 	NativeAudio_XaPreparedStreamClose(&prepared);
 
 #if defined(CTR_PS2)
+	Ps2XaHw_StartNoLock(); // sonar en el chip SPU2 si esta activo
 	printf("[CTR PS2] xa: tipo %d n.o %d -> ok (%s canal %d, %d Hz, %d frames, vol %d)\n", categoryID, xaID, path, info.channelFilter,
 	       s_audio.xa.sampleRate, s_audio.xa.frameCount, volumeLeft);
 #endif
@@ -4223,6 +4597,28 @@ internal int NativeAudio_GetXAMaxSampleAtSourceFrameNoLock(u64 frameIndex)
 	int max = 0;
 	int frame;
 
+#if defined(CTR_PS2)
+	if (s_ps2XaHw.active)
+	{
+		// XA en el chip: pico de la tabla (tramos de 128 frames) sin decodificar.
+		const u32 b = (u32)(frameIndex >> 7);
+		for (u32 i = 0; i < 2; i++)
+		{
+			const u32 bucket = b + i;
+			if ((s_ps2XaHw.peakBucket == 0xffffffffu) || (bucket > s_ps2XaHw.peakBucket) || (s_ps2XaHw.peakBucket - bucket >= PS2_XAHW_PEAK_BUCKETS))
+			{
+				continue;
+			}
+			const int v = s_ps2XaHwPeak[bucket & (PS2_XAHW_PEAK_BUCKETS - 1u)];
+			if (v > max)
+			{
+				max = v;
+			}
+		}
+		return max;
+	}
+#endif
+
 	if (s_audio.xa.active && (s_audio.xaStream.sectors != NULL))
 	{
 		for (frame = 0; frame < 0x80; frame++)
@@ -4301,6 +4697,16 @@ void Ps2Xa_Report(void)
 	printf("[CTR PS2] xa estado: sonando %d (tipo %d n.o %d) | vol %d,%d | master %d | mix %d | mezclado %u / sin mix %u / en pausa %u frames | pico %d -> %d\n",
 	       s_audio.xa.active, s_audio.xa.categoryID, s_audio.xa.xaID, s_audio.xa.volumeLeft, s_audio.xa.volumeRight, s_audio.masterVolumeLeft,
 	       s_audio.cdMixEnabled, (unsigned)g_ps2XaMixFrames, (unsigned)g_ps2XaNoMixFrames, (unsigned)g_ps2XaStallFrames, g_ps2XaPeakSrc, g_ps2XaPeakOut);
+	if (s_ps2XaHw.active || s_ps2XaHw.sectors)
+	{
+		const u64 pos = s_audio.xa.positionFp >> NATIVE_AUDIO_FP_SHIFT;
+		const u64 ahead = (s_ps2XaHw.writtenFrames > pos) ? (s_ps2XaHw.writtenFrames - pos) : 0;
+		const unsigned aheadMs = (s_ps2XaHw.rate > 0) ? (unsigned)((ahead * 1000u) / (u32)s_ps2XaHw.rate) : 0u;
+		printf("[CTR PS2] xa chip: %s | %s | por delante %u ms | sectores %u | pausas %u | vol %d,%d\n", s_ps2XaHw.active ? "si" : "no",
+		       s_ps2XaHw.stereo ? "estereo" : "mono", aheadMs, (unsigned)s_ps2XaHw.sectors, (unsigned)s_ps2XaHw.pauses, s_ps2XaHw.sentVolL, s_ps2XaHw.sentVolR);
+		s_ps2XaHw.sectors = 0;
+		s_ps2XaHw.pauses = 0;
+	}
 	g_ps2XaStallFrames = 0;
 	g_ps2XaPeakSrc = 0;
 	g_ps2XaPeakOut = 0;
