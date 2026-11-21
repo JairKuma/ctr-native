@@ -2036,10 +2036,28 @@ internal int NativeAudio_LookupXATrackInfo(int categoryID, int xaID, struct Nati
 		return 0;
 	}
 
+#if defined(CTR_PS2)
+	// NOTE: PS2 build. El indice de las XA se lee del disco una sola vez y se
+	// guarda: antes se releia en cada musica/frase (una espera al lector de
+	// ~125 ms con el juego parado, se notaba como un tiron).
+	static struct NativeAudioByteBuffer s_ps2Xnf;
+	static int s_ps2XnfLoaded = 0;
+	if (!s_ps2XnfLoaded)
+	{
+		if (!NativeAudio_ReadFileBytes("XA/ENG.XNF", &s_ps2Xnf))
+		{
+			return 0;
+		}
+		s_ps2XnfLoaded = 1;
+	}
+	xnf = s_ps2Xnf;
+#define NativeAudio_FreeByteBuffer(b) ((void)(b)) // no liberar la copia guardada
+#else
 	if (!NativeAudio_ReadFileBytes("XA/ENG.XNF", &xnf))
 	{
 		return 0;
 	}
+#endif
 
 	if (xnf.size < XA_HEADER_SIZE)
 	{
@@ -2099,6 +2117,9 @@ internal int NativeAudio_LookupXATrackInfo(int categoryID, int xaID, struct Nati
 	NativeAudio_FreeByteBuffer(&xnf);
 	return info->numSectors > 0;
 }
+#if defined(CTR_PS2)
+#undef NativeAudio_FreeByteBuffer
+#endif
 
 internal int NativeAudio_GetXASectorLayout(int byteCount, int *sectorSizeOut, int *sectorBaseOut, int *totalSectorsOut)
 {
