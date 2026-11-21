@@ -2551,6 +2551,13 @@ internal void NativeAudio_XaStreamStartNoLock(struct NativeAudioXaPreparedStream
 }
 
 // Decode one already-resident compressed sector into the rolling PCM window.
+#if defined(CTR_PS2)
+// 1 = la XA no ha podido leer su siguiente sector porque el lector esta ocupado
+// con otra lectura: NativeAudio_MixFrame no avanza la XA (pausa, sin saltos).
+global_variable int g_ps2XaStalled = 0;
+int NativeDiscImage_Ps2ReadXaSlotUserSector(u32 lba, u8 *dst);
+#endif
+
 internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 {
 	struct NativeAudioXaStream *xs = &s_audio.xaStream;
@@ -2567,19 +2574,31 @@ internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 		int found = 0;
 		while (xs->scanSector < xs->scanEnd)
 		{
-			// Si el lector esta ocupado (el audio se esta generando durante otra
-			// lectura) y el sector no esta en cache, esperar: silencio por ahora,
-			// sin dar la pista por terminada.
-			if (g_ps2DiscReadBusy && !NativeDiscImage_Ps2IsCached(xs->discFile.lba + (u32)xs->scanSector))
+			int readOk;
+			if (g_ps2DiscReadBusy)
 			{
-				return 0;
+				// El lector esta ocupado (el audio se esta generando durante otra
+				// lectura): solo se puede usar lo que ya este en el hueco de la XA,
+				// sin tocar la cache. Si no esta, la XA se queda en pausa (no
+				// avanza) hasta que acabe la otra lectura.
+				if (!NativeDiscImage_Ps2ReadXaSlotUserSector(xs->discFile.lba + (u32)xs->scanSector, xs->sectors))
+				{
+					g_ps2XaStalled = 1;
+					return 0;
+				}
+				xs->scanSector++;
+				readOk = 1;
 			}
-			const int sector = xs->scanSector++;
-			g_ps2DiscXaRead = 1; // usar el hueco de cache reservado para la XA
-			const int readOk = NativeDiscImage_ReadRawSectors(&xs->discFile, (u32)sector, 1, xs->sectors);
-			g_ps2DiscXaRead = 0;
+			else
+			{
+				const int sector = xs->scanSector++;
+				g_ps2DiscXaRead = 1; // usar el hueco de cache reservado para la XA
+				readOk = NativeDiscImage_ReadRawSectors(&xs->discFile, (u32)sector, 1, xs->sectors);
+				g_ps2DiscXaRead = 0;
+			}
 			if (!readOk)
 			{
+				printf("[CTR PS2] xa: error leyendo el sector %d: la pista se corta\n", xs->scanSector - 1);
 				break;
 			}
 			if (NativeAudio_IsXAAudioSector(xs->sectors, xs->sectorBase, xs->channelFilter))
@@ -3156,6 +3175,7 @@ int g_ps2XaPeakSrc = 0;     // pico de la XA decodificada (antes del volumen)
 int g_ps2XaPeakOut = 0;     // pico de la XA ya con volumen (lo que se oye)
 u32 g_ps2XaMixFrames = 0;   // frames con XA mezclada
 u32 g_ps2XaNoMixFrames = 0; // frames con XA activa pero "CD mix" apagado
+u32 g_ps2XaStallFrames = 0; // frames con la XA en pausa esperando al lector
 extern unsigned long long g_ps2ProfCdCycles; // ps2_audio_out.c
 
 static inline u32 NativeAudio_Ps2Now(void)
@@ -3202,8 +3222,20 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 		}
 		else
 		{
+#if defined(CTR_PS2)
+			g_ps2XaStalled = 0;
+#endif
 			int srcLeft = NativeAudio_GetXAMixSampleNoLock(0);
 			int srcRight = NativeAudio_GetXAMixSampleNoLock(1);
+#if defined(CTR_PS2)
+			if (g_ps2XaStalled)
+			{
+				// Falta el siguiente sector (lector ocupado): pausa. No se mezcla ni
+				// se avanza; se sigue en el mismo punto cuando acabe la lectura.
+				g_ps2XaStallFrames++;
+				goto ps2XaDone;
+			}
+#endif
 			int left = NativeAudio_ApplyVolume(srcLeft, s_audio.xa.volumeLeft, s_audio.masterVolumeLeft);
 			int right = NativeAudio_ApplyVolume(srcRight, s_audio.xa.volumeRight, s_audio.masterVolumeRight);
 #if defined(CTR_PS2)
@@ -3231,6 +3263,9 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 			NativeAudio_AdvanceXAOutputFrameNoLock();
 		}
 	}
+#if defined(CTR_PS2)
+ps2XaDone:
+#endif
 
 	PS2_AUDIO_PROF_MARK(profT1);
 #if defined(CTR_PS2)
@@ -4231,9 +4266,10 @@ int NativeAudio_GetXAMaxSampleAtOffset(int xaCurrOffset)
 // Estado de la XA para el log (ps2_audio_out.c, cada ~5 s).
 void Ps2Xa_Report(void)
 {
-	printf("[CTR PS2] xa estado: sonando %d (tipo %d n.o %d) | vol %d,%d | master %d | mix %d | mezclado %u / sin mix %u frames | pico %d -> %d\n",
+	printf("[CTR PS2] xa estado: sonando %d (tipo %d n.o %d) | vol %d,%d | master %d | mix %d | mezclado %u / sin mix %u / en pausa %u frames | pico %d -> %d\n",
 	       s_audio.xa.active, s_audio.xa.categoryID, s_audio.xa.xaID, s_audio.xa.volumeLeft, s_audio.xa.volumeRight, s_audio.masterVolumeLeft,
-	       s_audio.cdMixEnabled, (unsigned)g_ps2XaMixFrames, (unsigned)g_ps2XaNoMixFrames, g_ps2XaPeakSrc, g_ps2XaPeakOut);
+	       s_audio.cdMixEnabled, (unsigned)g_ps2XaMixFrames, (unsigned)g_ps2XaNoMixFrames, (unsigned)g_ps2XaStallFrames, g_ps2XaPeakSrc, g_ps2XaPeakOut);
+	g_ps2XaStallFrames = 0;
 	g_ps2XaPeakSrc = 0;
 	g_ps2XaPeakOut = 0;
 	g_ps2XaMixFrames = 0;

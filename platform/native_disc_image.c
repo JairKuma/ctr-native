@@ -246,6 +246,43 @@ internal void NativeDiscImage_InvalidateCache(void)
 	s_nativeDiscImageCacheCount = 0;
 }
 
+// Lectura "segura" para la musica XA mientras otra lectura del disco esta en
+// marcha (el audio se genera durante la espera del lector): copia el sector
+// SOLO si ya esta en el hueco de cache de la XA, sin tocar el estado de la
+// cache. Antes se usaba la lectura normal, que cambiaba el hueco activo a
+// mitad de la lectura de fuera: los datos del juego quedaban apuntados en el
+// hueco equivocado (el juego podia recibir audio XA en vez de sus datos) y la
+// XA veia sectores que no eran suyos y daba la pista por terminada (musica de
+// la intro de la carrera cortada).
+int NativeDiscImage_Ps2ReadXaSlotRawSector(u32 lba, u8 *sector)
+{
+	const int slot = NATIVE_DISC_IMAGE_XA_SLOT;
+	if (slot == s_nativeDiscImageActiveSlot)
+	{
+		return 0; // su estado vivo esta en las variables del hueco activo: no tocar
+	}
+	const u32 start = s_nativeDiscImageSlotStart[slot];
+	const u32 count = s_nativeDiscImageSlotCount[slot];
+	if ((count == 0) || (lba < start) || (lba >= start + count))
+	{
+		return 0;
+	}
+	memcpy(sector, &s_nativeDiscImageCacheSlots[slot][(lba - start) * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE], NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE);
+	return 1;
+}
+
+// Igual pero solo los datos de usuario (como NativeDiscImage_ReadRawSectors).
+int NativeDiscImage_Ps2ReadXaSlotUserSector(u32 lba, u8 *dst)
+{
+	u8 raw[NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE];
+	if (!NativeDiscImage_Ps2ReadXaSlotRawSector(lba, raw))
+	{
+		return 0;
+	}
+	memcpy(dst, &raw[NATIVE_DISC_IMAGE_MODE2_USER_OFFSET], NATIVE_DISC_IMAGE_MODE2_USER_SIZE);
+	return 1;
+}
+
 // 1 si el sector ya esta en alguna cache (se puede leer sin tocar el lector).
 int NativeDiscImage_Ps2IsCached(u32 lba)
 {
