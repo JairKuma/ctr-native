@@ -3955,28 +3955,47 @@ int NativeAudio_PlayXATrack(int categoryID, int xaID, int volumeLeft, int volume
 	struct NativeAudioXaPreparedStream prepared;
 	char path[128];
 
+#if defined(CTR_PS2)
+	// NOTE: PS2 build. Diagnostico: cada musica/voz XA que pide el juego.
+#define PS2_XA_FAIL(why)                                                                                                     \
+	do                                                                                                                       \
+	{                                                                                                                        \
+		printf("[CTR PS2] xa: tipo %d n.o %d -> FALLO (%s)\n", categoryID, xaID, why);                                       \
+		return 0;                                                                                                            \
+	} while (0)
+#else
+#define PS2_XA_FAIL(why) return 0
+#endif
+
 	if (!NativeAudio_SpuInit())
 	{
-		return 0;
+		PS2_XA_FAIL("SpuInit");
 	}
 
 	if (!NativeAudio_LookupXATrackInfo(categoryID, xaID, &info))
 	{
-		return 0;
+		PS2_XA_FAIL("no esta en XA/ENG.XNF o no se pudo leer");
 	}
 	if (!NativeAudio_BuildXAPath(path, sizeof(path), categoryID, info.fileNumber))
 	{
-		return 0;
+		PS2_XA_FAIL("ruta");
 	}
 	if (!NativeAudio_XaSourceOpen(path, &source))
 	{
-		return 0;
+#if defined(CTR_PS2)
+		printf("[CTR PS2] xa: no se pudo abrir %s\n", path);
+#endif
+		PS2_XA_FAIL("abrir archivo");
 	}
 	if (!NativeAudio_PrepareXAStream(&source, info.channelFilter, info.numSectors, &prepared))
 	{
 		NativeAudio_XaSourceClose(&source);
-		return 0;
+#if defined(CTR_PS2)
+		printf("[CTR PS2] xa: %s canal %d sectores %d\n", path, info.channelFilter, info.numSectors);
+#endif
+		PS2_XA_FAIL("preparar el audio");
 	}
+#undef PS2_XA_FAIL
 	NativeAudio_XaSourceClose(&source);
 
 	NativeAudio_LockOutput();
@@ -4001,6 +4020,10 @@ int NativeAudio_PlayXATrack(int categoryID, int xaID, int volumeLeft, int volume
 	NativeAudio_UnlockOutput();
 	NativeAudio_XaPreparedStreamClose(&prepared);
 
+#if defined(CTR_PS2)
+	printf("[CTR PS2] xa: tipo %d n.o %d -> ok (%s canal %d, %d Hz, %d frames, vol %d)\n", categoryID, xaID, path, info.channelFilter,
+	       s_audio.xa.sampleRate, s_audio.xa.frameCount, volumeLeft);
+#endif
 	return 1;
 }
 
