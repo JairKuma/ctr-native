@@ -267,6 +267,7 @@ struct NativeAudioXaPreparedStream
 	int scanSector;
 	int scanEnd;
 	int channelFilter;
+	int formatPending; // 1 = formato aun sin leer (se averigua con el 1er sector)
 #endif
 };
 
@@ -291,6 +292,9 @@ struct NativeAudioXaStream
 	int scanSector;
 	int scanEnd;
 	int channelFilter;
+	int formatPending;  // 1 = mono/estereo y frecuencia aun sin conocer
+	int firstAudio;     // primer sector de audio del canal (-1 = ninguno)
+	int strideKnown;    // 1 = ya se sabe cada cuantos sectores viene el canal
 #endif
 	s16 ring[NATIVE_AUDIO_XA_RING_FRAMES * NATIVE_AUDIO_CHANNELS];
 };
@@ -2314,6 +2318,17 @@ internal void NativeAudio_XaSourceClose(struct NativeAudioXaSource *src)
 }
 
 // Open the temporary preparation source: a host handle or disc-image extent.
+#if defined(CTR_PS2)
+#define PS2_XA_FILE_CACHE_MAX 64
+struct Ps2XaFileCacheEntry
+{
+	char path[64];
+	struct NativeDiscImageFile file;
+};
+global_variable struct Ps2XaFileCacheEntry s_ps2XaFileCache[PS2_XA_FILE_CACHE_MAX];
+global_variable int s_ps2XaFileCacheCount = 0;
+#endif
+
 internal int NativeAudio_XaSourceOpen(const char *path, struct NativeAudioXaSource *src)
 {
 	char resolved[512];
@@ -2339,7 +2354,34 @@ internal int NativeAudio_XaSourceOpen(const char *path, struct NativeAudioXaSour
 		return 1;
 	}
 
+#if defined(CTR_PS2)
+	// Buscar el archivo en los directorios del disco lee sectores del principio
+	// del CD: con el lector real de la PS2 eso es un viaje del cabezal (tiron)
+	// cada vez que empieza una XA. Se recuerdan los archivos ya encontrados.
+	int found = 0;
+	for (int i = 0; i < s_ps2XaFileCacheCount; i++)
+	{
+		if (strcmp(s_ps2XaFileCache[i].path, path) == 0)
+		{
+			src->discFile = s_ps2XaFileCache[i].file;
+			found = 1;
+			break;
+		}
+	}
+	if (!found && NativeDiscImage_FindFile(path, &src->discFile))
+	{
+		found = 1;
+		if ((s_ps2XaFileCacheCount < PS2_XA_FILE_CACHE_MAX) && (strlen(path) < sizeof(s_ps2XaFileCache[0].path)))
+		{
+			strcpy(s_ps2XaFileCache[s_ps2XaFileCacheCount].path, path);
+			s_ps2XaFileCache[s_ps2XaFileCacheCount].file = src->discFile;
+			s_ps2XaFileCacheCount++;
+		}
+	}
+	if (found)
+#else
 	if (NativeDiscImage_FindFile(path, &src->discFile))
+#endif
 	{
 		// raw disc reads deliver the 2336-byte mode2 payload per sector
 		src->kind = NATIVE_AUDIO_XA_SOURCE_DISC;
@@ -2418,44 +2460,13 @@ internal int NativeAudio_PrepareXAStream(struct NativeAudioXaSource *src, int ch
 	// resto y corrige la duracion al llegar al final.
 	if (src->kind == NATIVE_AUDIO_XA_SOURCE_DISC)
 	{
-		int first = -1;
-		int second = -1;
-		const int probeEnd = sectorsToScan < 256 ? sectorsToScan : 256;
-
-		for (int sector = 0; sector < probeEnd; sector++)
-		{
-			if (!NativeAudio_XaSourceReadSector(src, sector, sectorBuf))
-			{
-				return 0;
-			}
-			if (!NativeAudio_IsXAAudioSector(sectorBuf, src->sectorBase, channelFilter))
-			{
-				continue;
-			}
-			if (first < 0)
-			{
-				const u8 *header = &sectorBuf[src->sectorBase];
-				first = sector;
-				sampleRate = (((header[3] >> 2) & 0x03) == 0) ? XA_SAMPLE_RATE_37800 : XA_SAMPLE_RATE_18900;
-				numChannels = ((header[3] & 0x03) != 0) ? 2 : 1;
-			}
-			else
-			{
-				second = sector;
-				break;
-			}
-		}
-
-		if (first < 0)
-		{
-			return 0;
-		}
-
-		const int stride = (second > first) ? (second - first) : 1;
-		// Estimacion por exceso (se corrige al terminar la pista).
-		const int estimatedSectors = ((sectorsToScan - first) + stride - 1) / stride + 1;
-		const int framesPerSectorLazy = (numChannels == 2) ? (XA_SECTOR_MAX_SAMPLES / 2) : XA_SECTOR_MAX_SAMPLES;
-
+		// NO se lee nada aqui: antes se buscaban los 2 primeros sectores del
+		// canal leyendo el disco de golpe, y en la PS2 real eso daba un tiron
+		// cada vez que empezaba una frase o un sonido XA. El formato (mono o
+		// estereo, frecuencia) y la duracion se averiguan cuando llega el primer
+		// sector, leido en segundo plano. Mientras tanto: 37800 Hz mono y una
+		// duracion estimada por exceso (se corrige al leer).
+		(void)sectorBuf;
 		prepared->sectors = (u8 *)malloc((size_t)src->sectorSize);
 		if (prepared->sectors == NULL)
 		{
@@ -2463,15 +2474,16 @@ internal int NativeAudio_PrepareXAStream(struct NativeAudioXaSource *src, int ch
 		}
 		prepared->sectorSize = src->sectorSize;
 		prepared->sectorBase = src->sectorBase;
-		prepared->sectorCount = estimatedSectors;
-		prepared->frameCount = estimatedSectors * framesPerSectorLazy;
-		prepared->sampleRate = sampleRate;
-		prepared->numChannels = numChannels;
+		prepared->sectorCount = sectorsToScan;
+		prepared->frameCount = sectorsToScan * XA_SECTOR_MAX_SAMPLES;
+		prepared->sampleRate = XA_SAMPLE_RATE_37800;
+		prepared->numChannels = 1;
 		prepared->lazy = 1;
 		prepared->discFile = src->discFile;
-		prepared->scanSector = first;
+		prepared->scanSector = 0;
 		prepared->scanEnd = sectorsToScan;
 		prepared->channelFilter = channelFilter;
+		prepared->formatPending = 1;
 		return 1;
 	}
 #endif
@@ -2580,6 +2592,9 @@ internal void NativeAudio_XaStreamStartNoLock(struct NativeAudioXaPreparedStream
 	xs->scanSector = prepared->scanSector;
 	xs->scanEnd = prepared->scanEnd;
 	xs->channelFilter = prepared->channelFilter;
+	xs->formatPending = prepared->formatPending;
+	xs->firstAudio = -1;
+	xs->strideKnown = 0;
 #endif
 	prepared->sectors = NULL;
 }
@@ -2720,6 +2735,52 @@ internal void Ps2XaHw_AddPeaks(u64 firstFrame, const s16 *samples, int frames, i
 }
 #endif
 
+#if defined(CTR_PS2)
+// Con el primer sector de audio del canal se sabe el formato; con el segundo,
+// cada cuantos sectores viene (y asi la duracion aproximada de la pista).
+internal void Ps2Xa_LearnFormatNoLock(struct NativeAudioXaStream *xs, int sector)
+{
+	if (xs->strideKnown)
+	{
+		return;
+	}
+	if (xs->firstAudio < 0)
+	{
+		const u8 *header = &xs->sectors[xs->sectorBase];
+		xs->firstAudio = sector;
+		if (xs->formatPending)
+		{
+			const int rate = (((header[3] >> 2) & 0x03) == 0) ? XA_SAMPLE_RATE_37800 : XA_SAMPLE_RATE_18900;
+			xs->numChannels = ((header[3] & 0x03) != 0) ? 2 : 1;
+			xs->formatPending = 0;
+			s_audio.xa.sampleRate = rate;
+			s_audio.xa.stepFp = (u32)(((u64)rate << NATIVE_AUDIO_FP_SHIFT) / NATIVE_AUDIO_SAMPLE_RATE);
+			if (s_ps2XaHw.active)
+			{
+				s_ps2XaHw.stereo = (xs->numChannels == 2);
+				s_ps2XaHw.rate = rate;
+				s_ps2XaHw.pitch = (u32)(((u32)rate * 4096u + 24000u) / 48000u);
+			}
+		}
+		// Separacion tipica (lector a doble velocidad), hasta ver el 2o sector.
+		const int guess = ((s_audio.xa.sampleRate == XA_SAMPLE_RATE_37800) ? 16 : 32) / xs->numChannels;
+		const int framesPerSector = (xs->numChannels == 2) ? (XA_SECTOR_MAX_SAMPLES / 2) : XA_SECTOR_MAX_SAMPLES;
+		const int est = ((xs->scanEnd - sector) + guess - 1) / guess + 1;
+		s_audio.xa.frameCount = est * framesPerSector;
+		return;
+	}
+	const int stride = (sector > xs->firstAudio) ? (sector - xs->firstAudio) : 1;
+	const int framesPerSector = (xs->numChannels == 2) ? (XA_SECTOR_MAX_SAMPLES / 2) : XA_SECTOR_MAX_SAMPLES;
+	const int est = ((xs->scanEnd - xs->firstAudio) + stride - 1) / stride + 1;
+	const u64 frames = (u64)est * (u64)framesPerSector;
+	if (frames > xs->decodedFrames + (u64)framesPerSector)
+	{
+		s_audio.xa.frameCount = (int)frames;
+	}
+	xs->strideKnown = 1;
+}
+#endif
+
 internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 {
 	struct NativeAudioXaStream *xs = &s_audio.xaStream;
@@ -2776,6 +2837,7 @@ internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 			if (NativeAudio_IsXAAudioSector(xs->sectors, xs->sectorBase, xs->channelFilter))
 			{
 				found = 1;
+				Ps2Xa_LearnFormatNoLock(xs, xs->scanSector - 1);
 				break;
 			}
 		}
