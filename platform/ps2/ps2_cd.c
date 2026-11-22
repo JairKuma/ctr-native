@@ -193,9 +193,98 @@ static int Ps2Cd_ReadSectorsRaw(unsigned int lsn, unsigned int count, void *buf)
 	return ok;
 }
 
+// --- Lectura en segundo plano (para la musica XA) ------------------------------
+// La XA se lee mientras el juego sigue: se pide la lectura y se recoge cuando
+// acaba (antes el juego se quedaba parado esperando al lector, y con el MX4SIO
+// en la consola se notaba como lag cada vez que sonaba una XA).
+// Estados: 0 libre, 1 leyendo, 2 terminada bien, 3 terminada con error.
+static volatile int s_ps2CdAsyncState = 0;
+static sceCdRMode s_ps2CdAsyncMode;
+static unsigned int s_ps2CdAsyncReads = 0;
+static unsigned int s_ps2CdAsyncWaits = 0;
+
+static void Ps2Cd_AsyncCheck(void)
+{
+	if ((s_ps2CdAsyncState == 1) && (sceCdSync(1) == 0))
+	{
+		s_ps2CdAsyncState = (sceCdGetError() == SCECdErNO) ? 2 : 3;
+	}
+}
+
+// Pide leer 'count' sectores de 2048 bytes. 1 = pedida, 0 = no se pudo.
+int Ps2Cd_AsyncStart(unsigned int lsn, unsigned int count, void *buf)
+{
+	if (s_ps2CdAsyncState != 0)
+	{
+		return 0;
+	}
+	s_ps2CdAsyncMode.trycount = 5;
+	s_ps2CdAsyncMode.spindlctrl = SCECdSpinNom;
+	s_ps2CdAsyncMode.datapattern = SCECdSecS2048;
+	s_ps2CdAsyncMode.pad = 0;
+	if (sceCdRead(lsn, count, buf, &s_ps2CdAsyncMode) == 0)
+	{
+		return 0; // el lector esta ocupado
+	}
+	s_ps2CdAsyncState = 1;
+	s_ps2CdAsyncReads++;
+	return 1;
+}
+
+// 0 libre, 1 leyendo, 2 lista, 3 error (no cambia el estado salvo al terminar).
+int Ps2Cd_AsyncPoll(void)
+{
+	Ps2Cd_AsyncCheck();
+	return s_ps2CdAsyncState;
+}
+
+// Ya se han recogido los datos: el lector queda libre.
+void Ps2Cd_AsyncConsume(void)
+{
+	if (s_ps2CdAsyncState >= 2)
+	{
+		s_ps2CdAsyncState = 0;
+	}
+}
+
+// Esperar a que acabe la lectura en segundo plano (generando audio mientras).
+void Ps2Cd_AsyncWait(void)
+{
+	if (s_ps2CdAsyncState != 1)
+	{
+		return;
+	}
+	s_ps2CdAsyncWaits++;
+	const unsigned int start = Ps2Cd_ProfNow();
+	const unsigned long long audioStart = g_ps2ProfAudioCycles;
+	while (s_ps2CdAsyncState == 1)
+	{
+		Ps2Cd_AsyncCheck();
+		if (s_ps2CdAsyncState == 1)
+		{
+			Ps2AudioOut_PumpIdle();
+		}
+	}
+	const unsigned long long spent = (unsigned long long)(unsigned int)(Ps2Cd_ProfNow() - start);
+	const unsigned long long audio = g_ps2ProfAudioCycles - audioStart;
+	g_ps2ProfCdCycles += (spent > audio) ? (spent - audio) : 0ull;
+}
+
+void Ps2Cd_AsyncStats(unsigned int *reads, unsigned int *waits)
+{
+	*reads = s_ps2CdAsyncReads;
+	*waits = s_ps2CdAsyncWaits;
+	s_ps2CdAsyncReads = 0;
+	s_ps2CdAsyncWaits = 0;
+}
+
 static int Ps2Cd_ReadSectorsRawImpl(unsigned int lsn, unsigned int count, void *buf)
 {
 	sceCdRMode mode;
+
+	// Si hay una lectura de XA en marcha, el lector no admite otra: esperar a
+	// que acabe (sus datos se recogen despues).
+	Ps2Cd_AsyncWait();
 	mode.trycount = 5;
 	mode.spindlctrl = SCECdSpinNom;
 	mode.datapattern = SCECdSecS2048;
