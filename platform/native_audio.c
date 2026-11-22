@@ -2629,6 +2629,7 @@ struct Ps2XaHw
 	u32 pauses;
 	u32 sectors;
 	int filling;     // leyendo la XA ahora mismo (no volver a entrar)
+	int waitingStart; // esperando datos para empezar a sonar (sin parar el juego)
 };
 global_variable struct Ps2XaHw s_ps2XaHw;
 global_variable u8 s_ps2XaHwRingL[PS2_SPU2_XA_RING_BYTES] __attribute__((aligned(64)));
@@ -2947,6 +2948,25 @@ internal int Ps2XaHw_TrackFinishedReading(void)
 	return xs->nextSector >= xs->sectorCount;
 }
 
+// Empieza a sonar en cuanto hay datos suficientes (o la pista ya esta entera).
+internal void Ps2XaHw_TryStartVoices(void)
+{
+	if (!s_ps2XaHw.waitingStart)
+	{
+		return;
+	}
+	if (!s_ps2XaHw.ended && (s_ps2XaHw.writtenFrames < Ps2XaHw_MsToFrames(PS2_XAHW_PREFILL_MS)))
+	{
+		return;
+	}
+	const int volL = Ps2XaHw_VoiceVolume(s_audio.xa.volumeLeft, s_audio.masterVolumeLeft);
+	const int volR = Ps2XaHw_VoiceVolume(s_audio.xa.volumeRight, s_audio.masterVolumeRight);
+	Ps2Spu2_XaStart(s_ps2XaHw.pitch, volL, volR);
+	s_ps2XaHw.sentVolL = volL;
+	s_ps2XaHw.sentVolR = volR;
+	s_ps2XaHw.waitingStart = 0;
+}
+
 // Lee por adelantado (lo llama el audio en cada VBlank, ps2_audio_out.c).
 internal void Ps2XaHw_PumpNoLock(void)
 {
@@ -2964,7 +2984,7 @@ internal void Ps2XaHw_PumpNoLock(void)
 	// Volumen (fundidos, volumen de la musica en opciones...).
 	const int volL = Ps2XaHw_VoiceVolume(s_audio.xa.volumeLeft, s_audio.masterVolumeLeft);
 	const int volR = Ps2XaHw_VoiceVolume(s_audio.xa.volumeRight, s_audio.masterVolumeRight);
-	if ((volL != s_ps2XaHw.sentVolL) || (volR != s_ps2XaHw.sentVolR))
+	if (!s_ps2XaHw.waitingStart && ((volL != s_ps2XaHw.sentVolL) || (volR != s_ps2XaHw.sentVolR)))
 	{
 		Ps2Spu2_XaVolume(volL, volR);
 		s_ps2XaHw.sentVolL = volL;
@@ -2992,6 +3012,7 @@ internal void Ps2XaHw_PumpNoLock(void)
 	}
 	s_ps2XaHw.filling = 0;
 	Ps2XaHw_UploadDirty();
+	Ps2XaHw_TryStartVoices();
 }
 
 // Arranca la XA recien preparada en el chip (si se puede).
@@ -3012,19 +3033,17 @@ internal void Ps2XaHw_StartNoLock(void)
 
 	// Llenar un poco antes de empezar a sonar.
 	const u64 prefill = Ps2XaHw_MsToFrames(PS2_XAHW_PREFILL_MS);
+	// Lo que ya este en memoria se usa al momento; lo demas se pide en segundo
+	// plano y la XA empieza a sonar cuando llegue (el juego NO espera: antes cada
+	// frase nueva paraba el juego hasta tener medio segundo leido).
 	s_ps2XaHw.filling = 1;
+	s_ps2XaHw.waitingStart = 1;
 	for (int i = 0; (i < 80) && !s_ps2XaHw.ended && (s_ps2XaHw.writtenFrames < prefill); i++)
 	{
 		g_ps2XaStalled = 0;
 		if (!NativeAudio_XaStreamDecodeNextSectorNoLock())
 		{
-			if (g_ps2XaStalled)
-			{
-				// Al arrancar si se espera al bloque (hace falta algo para sonar).
-				NativeDiscImage_Ps2XaAsyncWait();
-				continue;
-			}
-			if (Ps2XaHw_TrackFinishedReading())
+			if (!g_ps2XaStalled && Ps2XaHw_TrackFinishedReading())
 			{
 				Ps2XaHw_MarkEnded();
 			}
@@ -3033,20 +3052,15 @@ internal void Ps2XaHw_StartNoLock(void)
 	}
 	s_ps2XaHw.filling = 0;
 	Ps2XaHw_UploadDirty();
-
-	const int volL = Ps2XaHw_VoiceVolume(s_audio.xa.volumeLeft, s_audio.masterVolumeLeft);
-	const int volR = Ps2XaHw_VoiceVolume(s_audio.xa.volumeRight, s_audio.masterVolumeRight);
-	Ps2Spu2_XaStart(s_ps2XaHw.pitch, volL, volR);
-	s_ps2XaHw.sentVolL = volL;
-	s_ps2XaHw.sentVolR = volR;
+	Ps2XaHw_TryStartVoices();
 }
 
 // En cada frame de audio con XA en el chip: avanzar el reloj (o esperar datos).
 internal void Ps2XaHw_MixStepNoLock(void)
 {
-	if (s_ps2XaHw.filling && (s_ps2XaHw.sentVolL < 0))
+	if (s_ps2XaHw.waitingStart)
 	{
-		return; // aun preparando el arranque: el reloj no corre
+		return; // aun no suena (esperando datos): el reloj no corre
 	}
 	const u64 pos = s_audio.xa.positionFp >> NATIVE_AUDIO_FP_SHIFT;
 	if (!s_ps2XaHw.ended && (s_ps2XaHw.writtenFrames < pos + Ps2XaHw_MsToFrames(PS2_XAHW_LOW_MS)))
