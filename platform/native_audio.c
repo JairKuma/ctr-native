@@ -2589,7 +2589,12 @@ internal void NativeAudio_XaStreamStartNoLock(struct NativeAudioXaPreparedStream
 // 1 = la XA no ha podido leer su siguiente sector porque el lector esta ocupado
 // con otra lectura: NativeAudio_MixFrame no avanza la XA (pausa, sin saltos).
 global_variable int g_ps2XaStalled = 0;
+global_variable u32 g_ps2XaAsyncStalls = 0; // veces que la XA espero a su bloque
 int NativeDiscImage_Ps2ReadXaSlotUserSector(u32 lba, u8 *dst);
+int NativeDiscImage_Ps2XaAsyncPoll(void);
+int NativeDiscImage_Ps2XaAsyncRequest(u32 lba);
+void NativeDiscImage_Ps2XaAsyncWait(void);
+void Ps2Cd_AsyncStats(unsigned int *reads, unsigned int *waits);
 
 // --- XA en el chip SPU2 ---------------------------------------------------------
 // La XA de PS1 (ADPCM de 4 bits en grupos de 128 bytes) usa los mismos filtros y
@@ -2747,10 +2752,20 @@ internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 			}
 			else
 			{
-				const int sector = xs->scanSector++;
-				g_ps2DiscXaRead = 1; // usar el hueco de cache reservado para la XA
-				readOk = NativeDiscImage_ReadRawSectors(&xs->discFile, (u32)sector, 1, xs->sectors);
-				g_ps2DiscXaRead = 0;
+				// Lector libre: la XA se lee EN SEGUNDO PLANO (el juego no espera).
+				// Si el sector no esta aun en el hueco de la XA, se pide el bloque
+				// y la XA espera (sin parar el juego) hasta que llegue.
+				const u32 lba = xs->discFile.lba + (u32)xs->scanSector;
+				NativeDiscImage_Ps2XaAsyncPoll();
+				if (!NativeDiscImage_Ps2ReadXaSlotUserSector(lba, xs->sectors))
+				{
+					NativeDiscImage_Ps2XaAsyncRequest(lba);
+					g_ps2XaStalled = 1;
+					g_ps2XaAsyncStalls++;
+					return 0;
+				}
+				xs->scanSector++;
+				readOk = 1;
 			}
 			if (!readOk)
 			{
@@ -2956,6 +2971,7 @@ internal void Ps2XaHw_PumpNoLock(void)
 		s_ps2XaHw.sentVolR = volR;
 	}
 
+	NativeDiscImage_Ps2XaAsyncPoll(); // recoger el bloque si ya llego
 	const u64 pos = s_audio.xa.positionFp >> NATIVE_AUDIO_FP_SHIFT;
 	const u64 target = pos + ((u64)(u32)s_audio.xa.sampleRate * PS2_XAHW_AHEAD_SECONDS_X10) / 10u;
 	const u64 ringFrames = Ps2XaHw_RingFrames();
@@ -2997,11 +3013,17 @@ internal void Ps2XaHw_StartNoLock(void)
 	// Llenar un poco antes de empezar a sonar.
 	const u64 prefill = Ps2XaHw_MsToFrames(PS2_XAHW_PREFILL_MS);
 	s_ps2XaHw.filling = 1;
-	for (int i = 0; (i < 40) && !s_ps2XaHw.ended && (s_ps2XaHw.writtenFrames < prefill); i++)
+	for (int i = 0; (i < 80) && !s_ps2XaHw.ended && (s_ps2XaHw.writtenFrames < prefill); i++)
 	{
 		g_ps2XaStalled = 0;
 		if (!NativeAudio_XaStreamDecodeNextSectorNoLock())
 		{
+			if (g_ps2XaStalled)
+			{
+				// Al arrancar si se espera al bloque (hace falta algo para sonar).
+				NativeDiscImage_Ps2XaAsyncWait();
+				continue;
+			}
 			if (Ps2XaHw_TrackFinishedReading())
 			{
 				Ps2XaHw_MarkEnded();
@@ -4702,8 +4724,12 @@ void Ps2Xa_Report(void)
 		const u64 pos = s_audio.xa.positionFp >> NATIVE_AUDIO_FP_SHIFT;
 		const u64 ahead = (s_ps2XaHw.writtenFrames > pos) ? (s_ps2XaHw.writtenFrames - pos) : 0;
 		const unsigned aheadMs = (s_ps2XaHw.rate > 0) ? (unsigned)((ahead * 1000u) / (u32)s_ps2XaHw.rate) : 0u;
-		printf("[CTR PS2] xa chip: %s | %s | por delante %u ms | sectores %u | pausas %u | vol %d,%d\n", s_ps2XaHw.active ? "si" : "no",
-		       s_ps2XaHw.stereo ? "estereo" : "mono", aheadMs, (unsigned)s_ps2XaHw.sectors, (unsigned)s_ps2XaHw.pauses, s_ps2XaHw.sentVolL, s_ps2XaHw.sentVolR);
+		unsigned asyncReads = 0, asyncWaits = 0;
+		Ps2Cd_AsyncStats(&asyncReads, &asyncWaits);
+		printf("[CTR PS2] xa chip: %s | %s | por delante %u ms | sectores %u | pausas %u | vol %d,%d | lecturas en 2o plano %u (esperas del juego %u, xa esperando %u)\n",
+		       s_ps2XaHw.active ? "si" : "no", s_ps2XaHw.stereo ? "estereo" : "mono", aheadMs, (unsigned)s_ps2XaHw.sectors, (unsigned)s_ps2XaHw.pauses,
+		       s_ps2XaHw.sentVolL, s_ps2XaHw.sentVolR, asyncReads, asyncWaits, (unsigned)g_ps2XaAsyncStalls);
+		g_ps2XaAsyncStalls = 0;
 		s_ps2XaHw.sectors = 0;
 		s_ps2XaHw.pauses = 0;
 	}

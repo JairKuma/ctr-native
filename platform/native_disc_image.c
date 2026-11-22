@@ -257,18 +257,116 @@ internal void NativeDiscImage_InvalidateCache(void)
 int NativeDiscImage_Ps2ReadXaSlotRawSector(u32 lba, u8 *sector)
 {
 	const int slot = NATIVE_DISC_IMAGE_XA_SLOT;
+	u32 start = s_nativeDiscImageSlotStart[slot];
+	u32 count = s_nativeDiscImageSlotCount[slot];
 	if (slot == s_nativeDiscImageActiveSlot)
 	{
-		return 0; // su estado vivo esta en las variables del hueco activo: no tocar
+		// Su estado vivo esta en las variables del hueco activo. Durante una
+		// lectura del juego el hueco activo nunca es el de la XA, asi que aqui
+		// no hay ninguna lectura a medias.
+		if (g_ps2DiscReadBusy)
+		{
+			return 0;
+		}
+		start = s_nativeDiscImageCacheStart;
+		count = s_nativeDiscImageCacheCount;
 	}
-	const u32 start = s_nativeDiscImageSlotStart[slot];
-	const u32 count = s_nativeDiscImageSlotCount[slot];
 	if ((count == 0) || (lba < start) || (lba >= start + count))
 	{
 		return 0;
 	}
 	memcpy(sector, &s_nativeDiscImageCacheSlots[slot][(lba - start) * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE], NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE);
 	return 1;
+}
+
+// --- Lectura de la XA en segundo plano ------------------------------------------
+// Se pide al lector el bloque siguiente (64 sectores) y el juego sigue; cuando
+// acaba se copia al hueco de la XA. Ver Ps2Cd_AsyncStart en ps2_cd.c.
+int Ps2Cd_AsyncStart(unsigned int lsn, unsigned int count, void *buf);
+int Ps2Cd_AsyncPoll(void);
+void Ps2Cd_AsyncConsume(void);
+void Ps2Cd_AsyncWait(void);
+static u8 s_ps2XaAsyncBuf[NATIVE_PS2_CD_BUF_SECTORS * NATIVE_PS2_CD_SECTOR] __attribute__((aligned(64)));
+static int s_ps2XaAsyncPending = 0; // 1 = hay un bloque de XA pedido
+static u32 s_ps2XaAsyncLba = 0;      // primer sector (crudo) del bloque
+static u32 s_ps2XaAsyncSkip = 0;     // bytes a saltar en el buffer
+static u32 s_ps2XaAsyncSize = 0;     // bytes utiles
+
+// Recoge el bloque si ya ha llegado. 1 = hay datos nuevos en el hueco de la XA.
+int NativeDiscImage_Ps2XaAsyncPoll(void)
+{
+	if (!s_ps2XaAsyncPending)
+	{
+		return 0;
+	}
+	const int state = Ps2Cd_AsyncPoll();
+	if (state < 2)
+	{
+		return 0; // aun leyendo
+	}
+	s_ps2XaAsyncPending = 0;
+	Ps2Cd_AsyncConsume();
+	if (state != 2)
+	{
+		return 0; // error: se volvera a pedir
+	}
+	const int slot = NATIVE_DISC_IMAGE_XA_SLOT;
+	const u32 sectors = s_ps2XaAsyncSize / NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE;
+	memcpy(s_nativeDiscImageCacheSlots[slot], s_ps2XaAsyncBuf + s_ps2XaAsyncSkip, sectors * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE);
+	s_nativeDiscImageSlotStart[slot] = s_ps2XaAsyncLba;
+	s_nativeDiscImageSlotCount[slot] = sectors;
+	if (slot == s_nativeDiscImageActiveSlot)
+	{
+		s_nativeDiscImageCacheStart = s_ps2XaAsyncLba;
+		s_nativeDiscImageCacheCount = sectors;
+	}
+	return 1;
+}
+
+// Pide el bloque que empieza en 'lba' (si el lector esta libre).
+int NativeDiscImage_Ps2XaAsyncRequest(u32 lba)
+{
+	if (s_ps2XaAsyncPending || g_ps2DiscReadBusy || !s_ps2CdDirect)
+	{
+		return s_ps2XaAsyncPending;
+	}
+	const u32 offset = lba * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE;
+	if ((lba >= 0x1C0000u) || (offset >= s_ps2CdSize))
+	{
+		return 0;
+	}
+	u32 size = NATIVE_DISC_IMAGE_CACHE_BYTES;
+	if (size > s_ps2CdSize - offset)
+	{
+		size = s_ps2CdSize - offset;
+	}
+	const u32 firstSector = offset / NATIVE_PS2_CD_SECTOR;
+	const u32 skip = offset % NATIVE_PS2_CD_SECTOR;
+	u32 count = (skip + size + NATIVE_PS2_CD_SECTOR - 1) / NATIVE_PS2_CD_SECTOR;
+	if (count > NATIVE_PS2_CD_BUF_SECTORS)
+	{
+		count = NATIVE_PS2_CD_BUF_SECTORS;
+		size = count * NATIVE_PS2_CD_SECTOR - skip;
+	}
+	if (!Ps2Cd_AsyncStart(s_ps2CdLsn + firstSector, count, s_ps2XaAsyncBuf))
+	{
+		return 0;
+	}
+	s_ps2XaAsyncPending = 1;
+	s_ps2XaAsyncLba = lba;
+	s_ps2XaAsyncSkip = skip;
+	s_ps2XaAsyncSize = size;
+	return 1;
+}
+
+// Esperar al bloque pedido (solo al arrancar una XA).
+void NativeDiscImage_Ps2XaAsyncWait(void)
+{
+	if (s_ps2XaAsyncPending)
+	{
+		Ps2Cd_AsyncWait();
+		NativeDiscImage_Ps2XaAsyncPoll();
+	}
 }
 
 // Igual pero solo los datos de usuario (como NativeDiscImage_ReadRawSectors).
