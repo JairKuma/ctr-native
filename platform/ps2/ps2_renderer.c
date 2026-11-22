@@ -187,6 +187,8 @@ struct Ps2Stats
 	u32 surfacePass2Skips;
 	u32 gsClears;
 	u32 gsClearsSkipped;
+	u32 p16Fallback;   // texturas de 16 bits que NO se encontraron en el GS
+	int p16LastX, p16LastY;
 };
 
 global_variable struct Ps2Stats s_stats;
@@ -737,6 +739,9 @@ internal int Ps2Tex_BindSlow(const GrVertex *v, GSTEXTURE *tex, u8 profile)
 			return 1;
 		}
 
+		s_stats.p16Fallback++;
+		s_stats.p16LastX = Ps2Tex_PageX(v->page);
+		s_stats.p16LastY = Ps2Tex_PageY(v->page);
 		const u32 pageVram = Ps2Tex_GetPage16(v->page, profile);
 		if (pageVram == 0)
 		{
@@ -959,6 +964,22 @@ internal void Ps2Renderer_UpdateStats(void)
 	       (double)s_stats.frames / seconds, s_stats.triangles / frames,
 	       (double)s_stats.pageUploads / frames, (double)s_stats.clutUploads / frames, (double)s_stats.page16Uploads / frames,
 	       s_stats.surfaceBinds, s_fbSnapshots, s_stats.skippedOffscreen, (double)s_stats.queueFlushes / frames, s_stats.readbacks);
+
+	// Diagnostico de los efectos que leen la pantalla.
+	printf("[CTR PS2] fb: 16 bits sin GS %u (ultima pag %d,%d) | zonas:", s_stats.p16Fallback, s_stats.p16LastX, s_stats.p16LastY);
+	for (int i = 0; i < PS2_MAX_FB_SURFACES; i++)
+	{
+		const struct Ps2FbSurface *z = &s_fbSurfaces[i];
+		if (z->valid)
+		{
+			printf(" [%d,%d %dx%d %s]", z->x, z->y, z->w, z->h, (z->gsVram == s_fbSnapshotVram) ? "copia" : "buffer");
+		}
+		else
+		{
+			printf(" [-]");
+		}
+	}
+	printf("\n");
 
 	memset(&s_stats, 0, sizeof(s_stats));
 	s_fbSnapshots = 0;
