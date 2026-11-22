@@ -2319,7 +2319,7 @@ internal void NativeAudio_XaSourceClose(struct NativeAudioXaSource *src)
 
 // Open the temporary preparation source: a host handle or disc-image extent.
 #if defined(CTR_PS2)
-#define PS2_XA_FILE_CACHE_MAX 64
+#define PS2_XA_FILE_CACHE_MAX 128
 struct Ps2XaFileCacheEntry
 {
 	char path[64];
@@ -2327,6 +2327,67 @@ struct Ps2XaFileCacheEntry
 };
 global_variable struct Ps2XaFileCacheEntry s_ps2XaFileCache[PS2_XA_FILE_CACHE_MAX];
 global_variable int s_ps2XaFileCacheCount = 0;
+
+internal int Ps2Xa_FindFileCached(const char *path, struct NativeDiscImageFile *file)
+{
+	for (int i = 0; i < s_ps2XaFileCacheCount; i++)
+	{
+		if (strcmp(s_ps2XaFileCache[i].path, path) == 0)
+		{
+			*file = s_ps2XaFileCache[i].file;
+			return 1;
+		}
+	}
+	if (!NativeDiscImage_FindFile(path, file))
+	{
+		return 0;
+	}
+	if ((s_ps2XaFileCacheCount < PS2_XA_FILE_CACHE_MAX) && (strlen(path) < sizeof(s_ps2XaFileCache[0].path)))
+	{
+		strcpy(s_ps2XaFileCache[s_ps2XaFileCacheCount].path, path);
+		s_ps2XaFileCache[s_ps2XaFileCacheCount].file = *file;
+		s_ps2XaFileCacheCount++;
+	}
+	return 1;
+}
+
+// La primera vez que suena una XA: buscar YA todos los archivos XA del disco
+// (musicas, Oxide y frases). Asi el tiron de buscarlos pasa una sola vez, al
+// arrancar, y no la primera vez que suena cada frase durante el juego.
+internal void Ps2Xa_PrewarmFiles(void)
+{
+	static int s_done = 0;
+	if (s_done)
+	{
+		return;
+	}
+	s_done = 1;
+	int files = 0;
+	for (int cat = 0; cat < 3; cat++)
+	{
+		int lastFile = -1;
+		for (int id = 0; id < 1024; id++)
+		{
+			struct NativeAudioXaTrackInfo info;
+			char path[64];
+			struct NativeDiscImageFile file;
+			if (!NativeAudio_LookupXATrackInfo(cat, id, &info))
+			{
+				break;
+			}
+			if (info.fileNumber == lastFile)
+			{
+				continue;
+			}
+			lastFile = info.fileNumber;
+			if (NativeAudio_BuildXAPath(path, sizeof(path), cat, info.fileNumber) && Ps2Xa_FindFileCached(path, &file))
+			{
+				files++;
+			}
+		}
+	}
+	printf("[CTR PS2] xa: %d archivos XA buscados por adelantado (guardados %d)\n", files, s_ps2XaFileCacheCount);
+}
 #endif
 
 internal int NativeAudio_XaSourceOpen(const char *path, struct NativeAudioXaSource *src)
@@ -2357,27 +2418,9 @@ internal int NativeAudio_XaSourceOpen(const char *path, struct NativeAudioXaSour
 #if defined(CTR_PS2)
 	// Buscar el archivo en los directorios del disco lee sectores del principio
 	// del CD: con el lector real de la PS2 eso es un viaje del cabezal (tiron)
-	// cada vez que empieza una XA. Se recuerdan los archivos ya encontrados.
-	int found = 0;
-	for (int i = 0; i < s_ps2XaFileCacheCount; i++)
-	{
-		if (strcmp(s_ps2XaFileCache[i].path, path) == 0)
-		{
-			src->discFile = s_ps2XaFileCache[i].file;
-			found = 1;
-			break;
-		}
-	}
-	if (!found && NativeDiscImage_FindFile(path, &src->discFile))
-	{
-		found = 1;
-		if ((s_ps2XaFileCacheCount < PS2_XA_FILE_CACHE_MAX) && (strlen(path) < sizeof(s_ps2XaFileCache[0].path)))
-		{
-			strcpy(s_ps2XaFileCache[s_ps2XaFileCacheCount].path, path);
-			s_ps2XaFileCache[s_ps2XaFileCacheCount].file = src->discFile;
-			s_ps2XaFileCacheCount++;
-		}
-	}
+	// cada vez que empieza una XA. Se recuerdan los archivos (ver
+	// Ps2Xa_PrewarmFiles: se buscan todos al principio).
+	const int found = Ps2Xa_FindFileCached(path, &src->discFile);
 	if (found)
 #else
 	if (NativeDiscImage_FindFile(path, &src->discFile))
@@ -4557,6 +4600,9 @@ int NativeAudio_PlayXATrack(int categoryID, int xaID, int volumeLeft, int volume
 		PS2_XA_FAIL("SpuInit");
 	}
 
+#if defined(CTR_PS2)
+	Ps2Xa_PrewarmFiles();
+#endif
 	if (!NativeAudio_LookupXATrackInfo(categoryID, xaID, &info))
 	{
 		PS2_XA_FAIL("no esta en XA/ENG.XNF o no se pudo leer");
