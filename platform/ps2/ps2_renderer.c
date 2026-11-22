@@ -41,6 +41,7 @@
 
 #include <dmaKit.h>
 #include <gsKit.h>
+#include <gsInline.h>
 #include <kernel.h>
 
 #include <stdio.h>
@@ -148,6 +149,12 @@ struct Ps2FbSurface
 global_variable struct Ps2FbSurface s_fbSurfaces[PS2_MAX_FB_SURFACES];
 global_variable int s_fbSurfaceNext = 0;
 global_variable const struct Ps2FbSurface *s_boundSurface = NULL;
+
+// Copia fija de la pantalla para los efectos que leen lo que se esta dibujando
+// (reloj, ondas, presentaciones, demo...). Comparte memoria del GS con la
+// textura de PresentVRAMRect (nunca se usan en el mismo fotograma).
+global_variable u32 s_fbSnapshotVram = 0;
+global_variable u32 s_fbSnapshots = 0; // copias hechas (para el log)
 
 // Lectura del framebuffer del GS a RAM (para StoreImage/MoveImage de la pantalla).
 global_variable u16 s_readbackPixels[640 * 512] __attribute__((aligned(64)));
@@ -815,7 +822,12 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 	s_gs->Interlace = GS_INTERLACED;
 	s_gs->Field = GS_FIELD;
 	s_gs->Width = 640;
-	s_gs->Height = 448;
+	// CTR dibuja 512x216. Con 448 lineas cada linea de PS1 ocupaba 2,07 lineas
+	// del GS: unas filas salian dobles y otras triples (sombras de letras que se
+	// mueven 1 pixel, imagen de la pausa 1 pixel mas abajo). Con 432 = 216 x 2
+	// cada linea ocupa exactamente 2. Se centra bajando 8 lineas.
+	s_gs->Height = 432;
+	s_gs->StartYOffset += 8;
 
 	// Framebuffer de 16 bits: PS1 trabaja con color de 15 bits, asi que no se
 	// pierde nada y queda casi el doble de memoria del GS para texturas.
@@ -839,7 +851,17 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 	s_vramDisplayTexture.PSM = GS_PSM_CT16;
 	s_vramDisplayTexture.Filter = GS_FILTER_NEAREST;
 	s_vramDisplayTexture.Mem = (u32 *)s_displayUpload;
-	s_vramDisplayTexture.Vram = gsKit_vram_alloc(s_gs, gsKit_texture_size(PS2_DISPLAY_TEX_W, PS2_DISPLAY_TEX_H, GS_PSM_CT16), GSKIT_ALLOC_USERBUFFER);
+	{
+		// La misma zona sirve para la copia fija de la pantalla (640x448, 16 bits).
+		u32 displayBytes = gsKit_texture_size(PS2_DISPLAY_TEX_W, PS2_DISPLAY_TEX_H, GS_PSM_CT16);
+		const u32 snapshotBytes = gsKit_texture_size(s_gs->Width, s_gs->Height, GS_PSM_CT16);
+		if (snapshotBytes > displayBytes)
+		{
+			displayBytes = snapshotBytes;
+		}
+		s_vramDisplayTexture.Vram = gsKit_vram_alloc(s_gs, displayBytes, GSKIT_ALLOC_USERBUFFER);
+		s_fbSnapshotVram = s_vramDisplayTexture.Vram;
+	}
 
 	if (s_vramDisplayTexture.Vram == GSKIT_ALLOC_ERROR)
 	{
@@ -933,12 +955,13 @@ internal void Ps2Renderer_UpdateStats(void)
 	}
 
 	const u32 frames = (s_stats.frames > 0) ? s_stats.frames : 1;
-	printf("[CTR PS2] perf: %.1f fps | tris/frame %u | uploads/frame: pages %.1f clut %.1f p16 %.1f | fb-tex %u | offscreen tris %u | flushes/frame %.1f | readbacks %u\n",
+	printf("[CTR PS2] perf: %.1f fps | tris/frame %u | uploads/frame: pages %.1f clut %.1f p16 %.1f | fb-tex %u (copias %u) | offscreen tris %u | flushes/frame %.1f | readbacks %u\n",
 	       (double)s_stats.frames / seconds, s_stats.triangles / frames,
 	       (double)s_stats.pageUploads / frames, (double)s_stats.clutUploads / frames, (double)s_stats.page16Uploads / frames,
-	       s_stats.surfaceBinds, s_stats.skippedOffscreen, (double)s_stats.queueFlushes / frames, s_stats.readbacks);
+	       s_stats.surfaceBinds, s_fbSnapshots, s_stats.skippedOffscreen, (double)s_stats.queueFlushes / frames, s_stats.readbacks);
 
 	memset(&s_stats, 0, sizeof(s_stats));
+	s_fbSnapshots = 0;
 	s_statsStart = now;
 }
 
@@ -981,28 +1004,16 @@ void NativeRenderer_SwapWindow(void)
 // VRAM
 // ---------------------------------------------------------------------------
 
-void NativeRenderer_StoreFrameBuffer(int x, int y, int w, int h)
+// Apunta que la zona (x, y, w, h) de la VRAM de PS1 esta en el buffer gsVram del GS.
+internal void Ps2Renderer_RegisterSurface(int x, int y, int w, int h, u32 gsVram)
 {
-	// En PC aqui se copia lo dibujado a la VRAM de PS1. En PS2 basta con apuntar
-	// que esa zona de VRAM esta ahora en el buffer del GS en el que se dibuja;
-	// si el juego la usa luego como textura, se lee directamente del GS.
-	Ps2Renderer_ClampRect(&x, &y, &w, &h);
-	if ((s_gs == NULL) || (w <= 0) || (h <= 0))
-	{
-		return;
-	}
-
-	Ps2Renderer_FlushQueue();
-	s_lastBindValid = 0;
-
-	const u32 drawBuffer = s_gs->ScreenBuffer[s_gs->ActiveBuffer & 1];
 	struct Ps2FbSurface *target = NULL;
 
 	// Reutiliza la entrada de la misma zona o la del mismo buffer del GS.
 	for (int i = 0; i < PS2_MAX_FB_SURFACES; i++)
 	{
 		struct Ps2FbSurface *surface = &s_fbSurfaces[i];
-		if (surface->valid && ((surface->gsVram == drawBuffer) || ((surface->x == x) && (surface->y == y))))
+		if (surface->valid && ((surface->gsVram == gsVram) || ((surface->x == x) && (surface->y == y))))
 		{
 			target = surface;
 			break;
@@ -1030,7 +1041,73 @@ void NativeRenderer_StoreFrameBuffer(int x, int y, int w, int h)
 	target->y = y;
 	target->w = w;
 	target->h = h;
-	target->gsVram = drawBuffer;
+	target->gsVram = gsVram;
+}
+
+// Copia dentro del GS (de memoria del GS a memoria del GS) del buffer en el que
+// se dibuja a la zona de la copia fija.
+internal void Ps2Renderer_SnapshotDrawBuffer(u32 drawBuffer)
+{
+	const u32 fbw = (u32)s_gs->Width / 64u;
+	u64 *p = (u64 *)gsKit_heap_alloc(s_gs, 5, 80, GIF_AD);
+	*p++ = GIF_TAG_AD(5);
+	*p++ = GIF_AD;
+	*p++ = GS_SETREG_BITBLTBUF(drawBuffer / 256u, fbw, s_gs->PSM, s_fbSnapshotVram / 256u, fbw, s_gs->PSM);
+	*p++ = GS_BITBLTBUF;
+	*p++ = GS_SETREG_TRXPOS(0, 0, 0, 0, 0);
+	*p++ = GS_TRXPOS;
+	*p++ = GS_SETREG_TRXREG(s_gs->Width, s_gs->Height);
+	*p++ = GS_TRXREG;
+	*p++ = GS_SETREG_TRXDIR(2); // de memoria del GS a memoria del GS
+	*p++ = GS_TRXDIR;
+	*p++ = 0;
+	*p++ = GS_TEXFLUSH;
+	s_fbSnapshots++;
+}
+
+// Fin de fotograma (ps2_platform.c): la imagen recien dibujada pasa a mostrarse
+// y el siguiente fotograma se dibuja en el otro buffer, asi que se puede leer
+// directamente de su buffer (fondo del menu de pausa, etc.).
+void Ps2Renderer_StoreDisplayedFrame(int x, int y, int w, int h)
+{
+	Ps2Renderer_ClampRect(&x, &y, &w, &h);
+	if ((s_gs == NULL) || (w <= 0) || (h <= 0))
+	{
+		return;
+	}
+
+	Ps2Renderer_FlushQueue();
+	s_lastBindValid = 0;
+	Ps2Renderer_RegisterSurface(x, y, w, h, s_gs->ScreenBuffer[s_gs->ActiveBuffer & 1]);
+}
+
+void NativeRenderer_StoreFrameBuffer(int x, int y, int w, int h)
+{
+	// Lo llama native_gpu.c justo antes de un grupo de poligonos que usan como
+	// textura la imagen que se esta dibujando (reloj, ondas, presentaciones...).
+	// En PC se hace una copia fija y los poligonos leen de ella. Antes aqui se
+	// leia del MISMO buffer en el que se pintaba: cada trozo leia lo que otro
+	// trozo acababa de pintar (cuadrados, imagen deformada, pantalla en blanco).
+	// Ahora se copia el buffer dentro del GS y se lee de la copia.
+	Ps2Renderer_ClampRect(&x, &y, &w, &h);
+	if ((s_gs == NULL) || (w <= 0) || (h <= 0))
+	{
+		return;
+	}
+
+	s_lastBindValid = 0;
+	const u32 drawBuffer = s_gs->ScreenBuffer[s_gs->ActiveBuffer & 1];
+
+	if ((s_fbSnapshotVram == 0) || (s_fbSnapshotVram == GSKIT_ALLOC_ERROR))
+	{
+		Ps2Renderer_FlushQueue();
+		Ps2Renderer_RegisterSurface(x, y, w, h, drawBuffer);
+		return;
+	}
+
+	Ps2Renderer_SnapshotDrawBuffer(drawBuffer);
+	Ps2Renderer_FlushQueue();
+	Ps2Renderer_RegisterSurface(x, y, w, h, s_fbSnapshotVram);
 }
 
 void NativeRenderer_PresentVRAMRect(int x, int y, int w, int h)
@@ -1053,6 +1130,16 @@ void NativeRenderer_PresentVRAMRect(int x, int y, int w, int h)
 	{
 		memcpy(&s_displayUpload[row * w], &s_vramPixels[(y + row) * VRAM_WIDTH + x], (size_t)w * sizeof(u16));
 	}
+
+	// Esta subida pisa la copia fija de la pantalla: olvidarla.
+	for (int i = 0; i < PS2_MAX_FB_SURFACES; i++)
+	{
+		if (s_fbSurfaces[i].valid && (s_fbSurfaces[i].gsVram == s_fbSnapshotVram))
+		{
+			s_fbSurfaces[i].valid = 0;
+		}
+	}
+	s_lastBindValid = 0;
 
 	s_vramDisplayTexture.Width = w;
 	s_vramDisplayTexture.Height = h;

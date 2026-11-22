@@ -18,6 +18,8 @@
 
 #include <kernel.h>
 
+void Ps2Renderer_StoreDisplayedFrame(int x, int y, int w, int h); // ps2_renderer.c
+
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -299,7 +301,7 @@ void Platform_EndScene(void)
 		return;
 	}
 
-	NativeRenderer_StoreFrameBuffer(activeDispEnv.disp.x, activeDispEnv.disp.y, activeDispEnv.disp.w, activeDispEnv.disp.h);
+	Ps2Renderer_StoreDisplayedFrame(activeDispEnv.disp.x, activeDispEnv.disp.y, activeDispEnv.disp.w, activeDispEnv.disp.h);
 	NativeRenderer_EndGpuFrame();
 	NativeRenderer_SwapWindow();
 }
