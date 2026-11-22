@@ -145,6 +145,7 @@ struct Ps2FbSurface
 	int valid;
 	int x, y, w, h; // rectangulo en VRAM de PS1
 	u32 gsVram;     // buffer del GS que lo contiene
+	int stp;        // 1 = sus pixeles llevan el bit STP de PS1 (ver s_frameStp)
 };
 global_variable struct Ps2FbSurface s_fbSurfaces[PS2_MAX_FB_SURFACES];
 global_variable int s_fbSurfaceNext = 0;
@@ -155,6 +156,20 @@ global_variable const struct Ps2FbSurface *s_boundSurface = NULL;
 // textura de PresentVRAMRect (nunca se usan en el mismo fotograma).
 global_variable u32 s_fbSnapshotVram = 0;
 global_variable u32 s_fbSnapshots = 0; // copias hechas (para el log)
+
+// Bit STP (bit 15) de lo dibujado. El GS no lo guarda como PS1, asi que se
+// apunta por fotograma: CTR, antes de usar la imagen anterior como textura en
+// el efecto del reloj/demo, pinta toda la pantalla con "poner bit de mascara"
+// (y el propio efecto copia texeles con STP). En PS1 esos texeles se mezclan al
+// 50%; sin esto el port los pintaba opacos: la imagen se ampliaba sobre si misma
+// en cada fotograma (cuadrados grandes en la demo) y el destello blanco del
+// reloj se quedaba fijo (pantalla blanca).
+global_variable int s_maskSet = 0;
+global_variable int s_frameStp = 0;
+global_variable int s_prevFrameStp = 0; // el del fotograma anterior
+global_variable u32 s_fbLastSnapX, s_fbLastSnapY, s_fbLastSnapW, s_fbLastSnapH;
+global_variable int s_fixAlphaOn = 0;
+global_variable u8 s_fixAlphaValue = 0;
 
 // Lectura del framebuffer del GS a RAM (para StoreImage/MoveImage de la pantalla).
 global_variable u16 s_readbackPixels[640 * 512] __attribute__((aligned(64)));
@@ -325,30 +340,43 @@ internal u8 Ps2Renderer_BlendFactor(BlendMode blendMode)
 	}
 }
 
-internal void Ps2Renderer_ApplyBlendMode(BlendMode blendMode)
+// Cv = ((A - B) * C >> 7) + D.  A/B/D: 0 = Cs, 1 = Cd, 2 = 0.  C: 0 = As, 2 = FIX.
+internal u64 Ps2Renderer_BlendReg(BlendMode blendMode, int useFix, u8 fix)
 {
-	// Cv = ((A - B) * As >> 7) + D.  A/B/D: 0 = Cs, 1 = Cd, 2 = 0.  C: 0 = As.
-	u64 alphaReg;
-
+	const int c = useFix ? 2 : 0;
 	switch (blendMode)
 	{
 	case BM_ADD:
 	case BM_ADD_QUATER_SOURCE:
-		alphaReg = GS_SETREG_ALPHA(0, 2, 0, 1, 0);
-		break;
+		return GS_SETREG_ALPHA(0, 2, c, 1, fix);
 	case BM_SUBTRACT:
-		alphaReg = GS_SETREG_ALPHA(2, 0, 0, 1, 0);
-		break;
+		return GS_SETREG_ALPHA(2, 0, c, 1, fix);
 	case BM_AVERAGE:
 	case BM_NONE:
 	default:
-		alphaReg = GS_SETREG_ALPHA(0, 1, 0, 1, 0);
-		break;
+		return GS_SETREG_ALPHA(0, 1, c, 1, fix);
 	}
+}
 
+internal void Ps2Renderer_ApplyBlendMode(BlendMode blendMode)
+{
 	s_gs->PrimAlphaEnable = GS_SETTING_ON;
-	gsKit_set_primalpha(s_gs, alphaReg, 0);
+	gsKit_set_primalpha(s_gs, Ps2Renderer_BlendReg(blendMode, 0, 0), 0);
 	s_modeAlpha = Ps2Renderer_BlendFactor(blendMode);
+	s_fixAlphaOn = 0;
+}
+
+// Mezcla con un factor fijo (para texturas que son la propia pantalla).
+internal void Ps2Renderer_SetFixAlpha(u8 fix)
+{
+	if (s_fixAlphaOn && (s_fixAlphaValue == fix))
+	{
+		return;
+	}
+	s_gs->PrimAlphaEnable = GS_SETTING_ON;
+	gsKit_set_primalpha(s_gs, Ps2Renderer_BlendReg(s_currentBlendMode, 1, fix), 0);
+	s_fixAlphaOn = 1;
+	s_fixAlphaValue = fix;
 }
 
 // ---------------------------------------------------------------------------
@@ -972,14 +1000,14 @@ internal void Ps2Renderer_UpdateStats(void)
 		const struct Ps2FbSurface *z = &s_fbSurfaces[i];
 		if (z->valid)
 		{
-			printf(" [%d,%d %dx%d %s]", z->x, z->y, z->w, z->h, (z->gsVram == s_fbSnapshotVram) ? "copia" : "buffer");
+			printf(" [%d,%d %dx%d %s%s]", z->x, z->y, z->w, z->h, (z->gsVram == s_fbSnapshotVram) ? "copia" : "buffer", z->stp ? " stp" : "");
 		}
 		else
 		{
 			printf(" [-]");
 		}
 	}
-	printf("\n");
+	printf(" | ultima copia %u,%u %ux%u | pasadas saltadas %u\n", s_fbLastSnapX, s_fbLastSnapY, s_fbLastSnapW, s_fbLastSnapH, s_stats.surfacePass2Skips);
 
 	memset(&s_stats, 0, sizeof(s_stats));
 	s_fbSnapshots = 0;
@@ -1026,7 +1054,7 @@ void NativeRenderer_SwapWindow(void)
 // ---------------------------------------------------------------------------
 
 // Apunta que la zona (x, y, w, h) de la VRAM de PS1 esta en el buffer gsVram del GS.
-internal void Ps2Renderer_RegisterSurface(int x, int y, int w, int h, u32 gsVram)
+internal void Ps2Renderer_RegisterSurface(int x, int y, int w, int h, u32 gsVram, int stp)
 {
 	struct Ps2FbSurface *target = NULL;
 
@@ -1063,6 +1091,7 @@ internal void Ps2Renderer_RegisterSurface(int x, int y, int w, int h, u32 gsVram
 	target->w = w;
 	target->h = h;
 	target->gsVram = gsVram;
+	target->stp = stp;
 }
 
 // Copia dentro del GS (de memoria del GS a memoria del GS) del buffer en el que
@@ -1099,7 +1128,9 @@ void Ps2Renderer_StoreDisplayedFrame(int x, int y, int w, int h)
 
 	Ps2Renderer_FlushQueue();
 	s_lastBindValid = 0;
-	Ps2Renderer_RegisterSurface(x, y, w, h, s_gs->ScreenBuffer[s_gs->ActiveBuffer & 1]);
+	Ps2Renderer_RegisterSurface(x, y, w, h, s_gs->ScreenBuffer[s_gs->ActiveBuffer & 1], s_frameStp);
+	s_prevFrameStp = s_frameStp;
+	s_frameStp = 0; // el siguiente fotograma empieza sin bit STP
 }
 
 void NativeRenderer_StoreFrameBuffer(int x, int y, int w, int h)
@@ -1122,13 +1153,19 @@ void NativeRenderer_StoreFrameBuffer(int x, int y, int w, int h)
 	if ((s_fbSnapshotVram == 0) || (s_fbSnapshotVram == GSKIT_ALLOC_ERROR))
 	{
 		Ps2Renderer_FlushQueue();
-		Ps2Renderer_RegisterSurface(x, y, w, h, drawBuffer);
+		Ps2Renderer_RegisterSurface(x, y, w, h, drawBuffer, s_frameStp);
 		return;
 	}
 
 	Ps2Renderer_SnapshotDrawBuffer(drawBuffer);
 	Ps2Renderer_FlushQueue();
-	Ps2Renderer_RegisterSurface(x, y, w, h, s_fbSnapshotVram);
+	// Si el fotograma anterior tenia STP (efecto del reloj/demo en marcha), la
+	// copia tambien: en PS1 el efecto lee la imagen anterior, que lo lleva.
+	Ps2Renderer_RegisterSurface(x, y, w, h, s_fbSnapshotVram, s_frameStp || s_prevFrameStp);
+	s_fbLastSnapX = (u32)x;
+	s_fbLastSnapY = (u32)y;
+	s_fbLastSnapW = (u32)w;
+	s_fbLastSnapH = (u32)h;
 }
 
 void NativeRenderer_PresentVRAMRect(int x, int y, int w, int h)
@@ -1655,7 +1692,7 @@ void NativeRenderer_SetPSXTextureOutputSTP(int enabled)
 
 void NativeRenderer_SetPSXDrawMaskSet(int maskSet)
 {
-	(void)maskSet;
+	s_maskSet = maskSet;
 }
 
 // ---------------------------------------------------------------------------
@@ -1695,6 +1732,11 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 	const int textured = (s_currentTexture == PS2_TEXTURE_ID_VRAM);
 	GSTEXTURE tex;
 
+	if (s_maskSet && (triangles > 0))
+	{
+		s_frameStp = 1; // se dibuja con "poner bit de mascara": pixeles con STP
+	}
+
 	for (int t = 0; t < triangles; t++)
 	{
 		const int index = startVertex + (t * 3);
@@ -1728,12 +1770,18 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 
 			if (s_boundSurface != NULL)
 			{
-				// Lo dibujado en pantalla no tiene bit STP: en la pasada mezclada de
-				// un semitransparente no se dibuja nada (igual que en PS1).
-				if (s_semiTransPass == 2)
+				// Texeles = pixeles de la pantalla: todos con STP o todos sin el.
+				// Pasada 1 (texeles sin STP, opacos) y pasada 2 (con STP, mezclados).
+				const int stp = s_boundSurface->stp;
+				if (((s_semiTransPass == 2) && !stp) || ((s_semiTransPass == 1) && stp))
 				{
 					s_stats.surfacePass2Skips++;
 					continue;
+				}
+				Ps2Renderer_SetFixAlpha((s_semiTransPass == 1) ? 0x80 : s_modeAlpha);
+				if (stp)
+				{
+					s_frameStp = 1; // PS1 copia el STP del texel al pixel
 				}
 
 				// Coordenadas de VRAM de PS1 -> pixeles del framebuffer del GS.
@@ -1749,6 +1797,11 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 				}
 			}
 
+			else if (s_fixAlphaOn)
+			{
+				Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
+			}
+
 			gsKit_prim_triangle_goraud_texture_3d(s_gs, &tex,
 			                                      v0->x * scaleX, v0->y * scaleY, 0, uv[0][0], uv[0][1],
 			                                      v1->x * scaleX, v1->y * scaleY, 0, uv[1][0], uv[1][1],
@@ -1759,6 +1812,10 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 		}
 		else
 		{
+			if (s_fixAlphaOn)
+			{
+				Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
+			}
 			s_stats.untexturedTris++;
 			// Sin textura, el alfa del vertice es directamente el factor de mezcla.
 			gsKit_prim_triangle_gouraud_3d(s_gs,
@@ -1776,6 +1833,11 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 		{
 			Ps2Renderer_FlushQueue();
 		}
+	}
+
+	if (s_fixAlphaOn)
+	{
+		Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
 	}
 }
 
