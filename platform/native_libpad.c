@@ -8,6 +8,11 @@
 
 s32 g_padCommEnable = 0;
 
+#if defined(CTR_PS2)
+int Ps2Input_PadInfoAct(int id, int acno, int term); // ps2_input.c
+int Ps2Input_PadSetMainMode(int id);
+#endif
+
 void PadInitMtap(unsigned char *slot1, unsigned char *slot2)
 {
 	Platform_InputPadInit(0, slot1);
@@ -31,6 +36,9 @@ int PadGetState(int port)
 
 int PadInfoAct(int port, int acno, int term)
 {
+#if defined(CTR_PS2)
+	return Ps2Input_PadInfoAct(port, acno, term);
+#endif
 	(void)port;
 	(void)acno;
 	(void)term;
@@ -46,6 +54,14 @@ int PadSetActAlign(int port, unsigned char *table)
 
 int PadSetMainMode(int socket, int offs, int lock)
 {
+#if defined(CTR_PS2)
+	if (offs == 1)
+	{
+		(void)lock;
+		return Ps2Input_PadSetMainMode(socket);
+	}
+	return 0;
+#endif
 	(void)socket;
 	(void)offs;
 	(void)lock;
