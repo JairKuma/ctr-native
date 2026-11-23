@@ -72,11 +72,13 @@ void NativeCD_Ps2Pump(void)
 	}
 	s_ps2CdJobInPump = 1;
 	const int result = NativeDiscImage_Ps2JobStep(0);
+	s_ps2CdJobInPump = 0;
+	// El callback va fuera del cerrojo: si el juego empieza otra lectura desde
+	// el callback y espera en un bucle, esa lectura tiene que poder avanzar.
 	if (result != 0)
 	{
 		NativeCD_Ps2JobDone(result);
 	}
-	s_ps2CdJobInPump = 0;
 }
 
 // El juego va a usar el lector para otra cosa: acabar antes la carga en curso
@@ -387,9 +389,6 @@ CdlLOC *CdIntToPos(int val, CdlLOC *p)
 
 CdlFILE *CdSearchFile(CdlFILE *loc, char *filename)
 {
-#if defined(CTR_PS2)
-	NativeCD_Ps2Finish();
-#endif
 	if (NativeCD_SearchFile(loc, filename) == 0)
 	{
 		return NULL;
@@ -402,13 +401,10 @@ int CdControl(uint8_t com, uint8_t *param, uint8_t *result)
 {
 	(void)result;
 
-#if defined(CTR_PS2)
-	if ((com == CdlSetloc) || (com == CdlPlay) || (com == CdlReadN) || (com == CdlPause) || (com == CdlSetmode) || (com == CdlSeekL) ||
-	    (com == CdlSeekP) || (com == CdlReadS))
-	{
-		NativeCD_Ps2Finish();
-	}
-#endif
+	// PS2: las ordenes del lector NO esperan a la carga en segundo plano. La
+	// carga guarda su propio archivo y sector, y estas ordenes (sobre todo las
+	// de la musica XA) llegan tambien desde el callback de VSync, donde esperar
+	// al lector bloqueaba el juego.
 
 	NativeCD_SetLastCom(com);
 

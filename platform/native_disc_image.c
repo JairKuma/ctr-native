@@ -427,6 +427,7 @@ static u32 s_ps2JobStatFiles = 0;
 static u32 s_ps2JobStatSectors = 0;
 static u32 s_ps2JobStatBlocks = 0;
 static u32 s_ps2JobStatForced = 0;
+static u32 s_ps2JobLogCount = 0; // las primeras cargas se apuntan en el log
 
 // 1 si el sector esta en un hueco de datos del juego (no en el de la XA).
 internal int NativeDiscImage_Ps2GameSlotHas(u32 lba)
@@ -554,6 +555,10 @@ int NativeDiscImage_Ps2JobStart(const struct NativeDiscImageFile *file, u32 sect
 	s_ps2JobActive = 1;
 	s_ps2JobStatFiles++;
 	s_ps2JobStatSectors += sectorCount;
+	if (++s_ps2JobLogCount <= 40)
+	{
+		printf("[CTR PS2] carga #%u: lba %u, %u sectores\n", (unsigned)s_ps2JobLogCount, (unsigned)(file->lba + sector), (unsigned)sectorCount);
+	}
 	return 1;
 }
 
@@ -617,6 +622,10 @@ int NativeDiscImage_Ps2JobStep(int mayBlock)
 		copied++;
 	}
 	NativeDiscImage_Ps2JobStop();
+	if (s_ps2JobLogCount <= 40)
+	{
+		printf("[CTR PS2] carga #%u lista%s\n", (unsigned)s_ps2JobLogCount, mayBlock ? " (forzada)" : "");
+	}
 	if (s_ps2JobStatFiles >= 20)
 	{
 		printf("[CTR PS2] cargas en 2o plano: archivos %u | %u KB | bloques %u | esperas forzadas %u\n", (unsigned)s_ps2JobStatFiles,
