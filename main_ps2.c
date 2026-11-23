@@ -103,7 +103,12 @@
 #define PS2_USE_SPU2 1
 
 // --- Colores de diagnostico (consola real, sin texto) ------------------------
-// La pantalla muestra el color del ULTIMO paso completado; si se cuelga, el
+// 1 = se ven los colores de abajo al arrancar (para buscar fallos de arranque
+//     en la PS2 real). 0 = arranque normal: pantalla negra. El rojo de
+//     "CTR_U.BIN no encontrado" se muestra siempre.
+#define PS2_DEBUG_COLORS 0
+
+// Con PS2_DEBUG_COLORS a 1, la pantalla muestra el color del ULTIMO paso completado; si se cuelga, el
 // fallo esta en el paso siguiente:
 //   azul      GS iniciado
 //   morado    rom0:XSIO2MAN cargado
@@ -117,6 +122,17 @@
 //   verde     CTR_U.BIN encontrado; arrancando el juego
 //   rojo      CTR_U.BIN NO encontrado (se queda en rojo)
 void Ps2Renderer_DebugScreen(u8 r, u8 g, u8 b);
+
+static void Ps2Main_DiagColor(u8 r, u8 g, u8 b)
+{
+#if PS2_DEBUG_COLORS
+	Ps2Renderer_DebugScreen(r, g, b);
+#else
+	(void)r;
+	(void)g;
+	(void)b;
+#endif
+}
 
 // audsrv.irx va incrustado en el ELF (Makefile.ps2 lo genera con bin2c).
 extern unsigned char audsrv_irx[];
@@ -154,7 +170,7 @@ static void Ps2Main_LoadIopModules(void)
 		if ((strcmp(modules[i], "rom0:XMCMAN") == 0) || (strcmp(modules[i], "rom0:XMCSERV") == 0))
 		{
 			printf("[CTR PS2] Skip %s (memory card desactivada para la prueba)\n", modules[i]);
-			Ps2Renderer_DebugScreen(colors[i][0], colors[i][1], colors[i][2]);
+			Ps2Main_DiagColor(colors[i][0], colors[i][1], colors[i][2]);
 			continue;
 		}
 #endif
@@ -165,7 +181,7 @@ static void Ps2Main_LoadIopModules(void)
 			id = SifLoadModule(fallbacks[i], 0, NULL);
 			printf("[CTR PS2] Load %s (fallback): %s (%d)\n", fallbacks[i], (id >= 0) ? "ok" : "FAILED", id);
 		}
-		Ps2Renderer_DebugScreen(colors[i][0], colors[i][1], colors[i][2]);
+		Ps2Main_DiagColor(colors[i][0], colors[i][1], colors[i][2]);
 	}
 
 	// Permite cargar modulos desde la RAM del EE en BIOS antiguas.
@@ -174,7 +190,7 @@ static void Ps2Main_LoadIopModules(void)
 	int moduleResult = 0;
 	const int audsrvId = SifExecModuleBuffer(audsrv_irx, size_audsrv_irx, 0, NULL, &moduleResult);
 	printf("[CTR PS2] Load audsrv.irx: %s (%d, %d)\n", (audsrvId >= 0) ? "ok" : "FAILED", audsrvId, moduleResult);
-	Ps2Renderer_DebugScreen(0xff, 0xff, 0xff); // blanco
+	Ps2Main_DiagColor(0xff, 0xff, 0xff); // blanco
 
 #if PS2_USE_SPU2
 	moduleResult = 0;
@@ -184,7 +200,7 @@ static void Ps2Main_LoadIopModules(void)
 	printf("[CTR PS2] Load ctrspu2.irx: %s (%d, %d)\n", s_ps2Spu2ModuleLoaded ? "ok" : "FAILED", spu2Id, moduleResult);
 	if (s_ps2Spu2ModuleLoaded)
 	{
-		Ps2Renderer_DebugScreen(0x00, 0xc0, 0xa0); // turquesa
+		Ps2Main_DiagColor(0x00, 0xc0, 0xa0); // turquesa
 	}
 #endif
 }
@@ -311,9 +327,11 @@ int main(int argc, char *argv[])
 {
 	SifInitRpc(0);
 
-	// El GS se inicia lo primero para poder mostrar colores de diagnostico.
+	// El GS se inicia lo primero: pantalla negra limpia (o los colores de
+	// diagnostico si PS2_DEBUG_COLORS esta a 1).
 	NativeRenderer_InitialiseRender((char *)"Crash Team Racing", 640, 448, 1);
-	Ps2Renderer_DebugScreen(0x00, 0x00, 0xc0); // azul
+	Ps2Renderer_DebugScreen(0x00, 0x00, 0x00);
+	Ps2Main_DiagColor(0x00, 0x00, 0xc0); // azul
 
 	Ps2Main_LoadIopModules();
 	Ps2AudioOut_Init();
@@ -322,7 +340,7 @@ int main(int argc, char *argv[])
 	{
 		printf("[CTR PS2] spu2: no disponible, voces emuladas por software\n");
 	}
-	Ps2Renderer_DebugScreen(0x80, 0x80, 0x80); // gris
+	Ps2Main_DiagColor(0x80, 0x80, 0x80); // gris
 
 	printf("[CTR PS2] CTR Native %s starting...\n", CTR_NATIVE_VERSION);
 
@@ -338,7 +356,7 @@ int main(int argc, char *argv[])
 	}
 
 	printf("[CTR PS2] Base: %s\n", baseDir);
-	Ps2Renderer_DebugScreen(0x00, 0xc0, 0x00); // verde
+	Ps2Main_DiagColor(0x00, 0xc0, 0x00); // verde
 
 	if (!NativeAssets_Init(baseDir))
 	{
