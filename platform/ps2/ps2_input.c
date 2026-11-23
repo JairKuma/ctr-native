@@ -38,6 +38,8 @@ struct Ps2InputPad
 	u8 analog[4];
 	int graceFrames;   // frames restantes de "conectado" sin poder leer
 	int modeStep;      // 0 = pedir modo analogico, 1 = esperando, 2 = hecho
+	int modeTries;     // intentos esperando a que el mando diga sus modos
+	int verifyLeft;    // comprobaciones que quedan de que quedo en analogico
 };
 
 // libpad necesita 256 bytes alineados a 64 por puerto.
@@ -120,6 +122,15 @@ internal void Ps2Input_TrySetAnalog(int port, struct Ps2InputPad *pad)
 				hasDualShock = 1;
 			}
 		}
+		if (modes <= 0)
+		{
+			// Recien conectado: el mando aun no ha dicho sus modos. Reintentar
+			// (antes se daba por "mando digital" y el analogico no se encendia).
+			if (++pad->modeTries < 600)
+			{
+				return;
+			}
+		}
 		if (!hasDualShock)
 		{
 			pad->modeStep = 2; // mando digital: nada que hacer
@@ -148,6 +159,21 @@ internal void Ps2Input_TrySetAnalog(int port, struct Ps2InputPad *pad)
 			pad->modeStep = 0; // reintentar
 		}
 	}
+	else if ((pad->modeStep == 2) && (pad->verifyLeft > 0))
+	{
+		// Comprobar que de verdad quedo en analogico (algunos mandos ignoran la
+		// primera orden justo al conectarse).
+		const int cur = padInfoMode(port, 0, PAD_MODECURID, 0);
+		pad->verifyLeft--;
+		if ((cur != 0) && (cur != PAD_TYPE_DUALSHOCK) && (padInfoMode(port, 0, PAD_MODETABLE, -1) > 0))
+		{
+			pad->modeStep = 0; // no quedo en analogico: volver a pedirlo
+		}
+		else
+		{
+			pad->verifyLeft = 0; // ya comprobado
+		}
+	}
 }
 
 internal void Ps2Input_ReadPad(int port)
@@ -166,6 +192,8 @@ internal void Ps2Input_ReadPad(int port)
 	{
 		// Mando quitado de verdad: la proxima vez se vuelve a poner en analogico.
 		pad->modeStep = 0;
+		pad->modeTries = 0;
+		pad->verifyLeft = 3;
 		Ps2Input_KeepDuringTransition(pad);
 		return;
 	}
@@ -175,7 +203,7 @@ internal void Ps2Input_ReadPad(int port)
 		return;
 	}
 
-	if (state == PAD_STATE_STABLE && pad->modeStep != 2)
+	if ((state == PAD_STATE_STABLE) && ((pad->modeStep != 2) || (pad->verifyLeft > 0)))
 	{
 		Ps2Input_TrySetAnalog(port, pad);
 	}
@@ -224,6 +252,7 @@ int Platform_InputInit(void)
 	for (int port = 0; port < PS2_INPUT_PHYSICAL_SLOT_COUNT; port++)
 	{
 		s_ps2Pads[port].opened = (padPortOpen(port, 0, s_ps2PadArea[port]) != 0);
+		s_ps2Pads[port].verifyLeft = 3;
 		printf("[CTR PS2] Pad port %d: %s\n", port + 1, s_ps2Pads[port].opened ? "open" : "FAILED");
 	}
 

@@ -278,7 +278,10 @@ internal int Ps2Renderer_RectsOverlap(int ax, int ay, int aw, int ah, int bx, in
 internal void Ps2Renderer_VMap(int srcH, float *scale, float *offset)
 {
 	const int screenH = s_gs->Height;
-	if (srcH > 0)
+	// DESACTIVADO: en la PS2 real (imagen entrelazada en la tele) las letras y
+	// los iconos se veian PEOR con la escala entera. Se vuelve a la escala de
+	// antes (448 / 216). Poner a 1 para probar otra vez.
+	if (0 && (srcH > 0))
 	{
 		const int k = screenH / srcH;
 		const int border = screenH - k * srcH;
