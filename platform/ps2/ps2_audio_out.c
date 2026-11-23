@@ -293,6 +293,32 @@ void Ps2AudioOut_OnVBlankIsr(void)
 	}
 }
 
+// Vigilante: si el hilo principal deja de entregar VBlanks (juego atascado)
+// durante 3 s, se escribe en el log donde esta (cargas del disco). Diagnostico.
+global_variable volatile u32 s_ps2MainBeat = 0;
+void NativeDiscImage_Ps2JobDebugPrint(void);
+int NativeCD_Ps2Busy(void);
+
+internal void Ps2AudioOut_Watchdog(void)
+{
+	static u32 lastBeat = 0;
+	static u32 lastChangeHw = 0;
+	static u32 lastReportHw = 0;
+	const u32 hw = Ps2_GetHwVBlankCount();
+	if (s_ps2MainBeat != lastBeat)
+	{
+		lastBeat = s_ps2MainBeat;
+		lastChangeHw = hw;
+		return;
+	}
+	if (((hw - lastChangeHw) >= 180) && ((hw - lastReportHw) >= 300))
+	{
+		lastReportHw = hw;
+		printf("[CTR PS2] vigilante: el juego lleva %u VBlanks sin avanzar | carga en marcha %d\n", (unsigned)(hw - lastChangeHw), NativeCD_Ps2Busy());
+		NativeDiscImage_Ps2JobDebugPrint();
+	}
+}
+
 internal void Ps2AudioOut_FeederThread(void *arg)
 {
 	(void)arg;
@@ -300,6 +326,7 @@ internal void Ps2AudioOut_FeederThread(void *arg)
 	{
 		WaitSema(s_ps2AudioFeedSema);
 		Ps2AudioOut_Flush();
+		Ps2AudioOut_Watchdog();
 	}
 }
 
@@ -554,4 +581,5 @@ void Ps2AudioOut_Pump(void)
 	}
 	Ps2AudioOut_Service();
 	Ps2AudioOut_Report();
+	s_ps2MainBeat++;
 }

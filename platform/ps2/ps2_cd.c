@@ -199,6 +199,12 @@ static int Ps2Cd_ReadSectorsRaw(unsigned int lsn, unsigned int count, void *buf)
 // en la consola se notaba como lag cada vez que sonaba una XA).
 // Estados: 0 libre, 1 leyendo, 2 terminada bien, 3 terminada con error.
 static volatile int s_ps2CdAsyncState = 0;
+// Vigilante (ps2_audio_out.c): en que espera del lector esta el juego.
+volatile int g_ps2CdWhere = 0;
+int Ps2Cd_AsyncGetState(void)
+{
+	return s_ps2CdAsyncState;
+}
 static sceCdRMode s_ps2CdAsyncMode;
 static unsigned int s_ps2CdAsyncReads = 0;
 static unsigned int s_ps2CdAsyncWaits = 0;
@@ -255,6 +261,8 @@ void Ps2Cd_AsyncWait(void)
 		return;
 	}
 	s_ps2CdAsyncWaits++;
+	const int savedWhere = g_ps2CdWhere;
+	g_ps2CdWhere = 40;
 	const unsigned int start = Ps2Cd_ProfNow();
 	const unsigned long long audioStart = g_ps2ProfAudioCycles;
 	while (s_ps2CdAsyncState == 1)
@@ -268,6 +276,7 @@ void Ps2Cd_AsyncWait(void)
 	const unsigned long long spent = (unsigned long long)(unsigned int)(Ps2Cd_ProfNow() - start);
 	const unsigned long long audio = g_ps2ProfAudioCycles - audioStart;
 	g_ps2ProfCdCycles += (spent > audio) ? (spent - audio) : 0ull;
+	g_ps2CdWhere = savedWhere;
 }
 
 void Ps2Cd_AsyncStats(unsigned int *reads, unsigned int *waits)
@@ -295,10 +304,13 @@ static int Ps2Cd_ReadSectorsRawImpl(unsigned int lsn, unsigned int count, void *
 		if (sceCdRead(lsn, count, buf, &mode) != 0)
 		{
 			// Espera no bloqueante: mientras lee, seguimos alimentando el audio.
+			const int savedWhere = g_ps2CdWhere;
+			g_ps2CdWhere = 41;
 			while (sceCdSync(1) != 0)
 			{
 				Ps2AudioOut_PumpIdle();
 			}
+			g_ps2CdWhere = savedWhere;
 			if (sceCdGetError() == SCECdErNO)
 			{
 				return 1;
