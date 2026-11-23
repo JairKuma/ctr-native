@@ -1,5 +1,9 @@
 #include <common.h>
 
+#if defined(CTR_PS2)
+void NativeCD_Ps2Pump(void); // platform/native_cd.c
+#endif
+
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
 #include <platform/native_perf.h>
 #include <platform/native_replay_scheduler.h>
@@ -89,6 +93,13 @@ u32 main(void)
 		}
 #endif
 
+#if defined(CTR_PS2)
+		// PS2: las cargas del disco van en segundo plano y avanzan en VSync. En
+		// PS1 el lector acababa solo (interrupcion), y aqui hay esperas que dan
+		// vueltas a este bucle sin VSync (p. ej. LOAD_VLC tras cargar el menu):
+		// avanzar la carga tambien en cada vuelta.
+		NativeCD_Ps2Pump();
+#endif
 		LOAD_NextQueuedFile();
 		CDSYS_XAPauseAtEnd();
 
