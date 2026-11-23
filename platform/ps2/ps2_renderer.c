@@ -270,6 +270,29 @@ internal int Ps2Renderer_RectsOverlap(int ax, int ay, int aw, int ah, int bx, in
 	return (ax < bx + bw) && (bx < ax + aw) && (ay < by + bh) && (by < ay + ah);
 }
 
+// Escala vertical de PS1 -> GS. CTR dibuja 216 lineas: con 448 cada linea de
+// PS1 ocupaba 2,07 del GS (unas filas dobles y otras triples: sombras de letras
+// que se movian 1 pixel). Si cabe una escala ENTERA dejando poco borde (216 x 2
+// = 432, borde de 8 lineas arriba y abajo) se usa esa, centrada con un borde
+// PAR (para no cambiar que lineas van en cada campo del entrelazado).
+internal void Ps2Renderer_VMap(int srcH, float *scale, float *offset)
+{
+	const int screenH = s_gs->Height;
+	if (srcH > 0)
+	{
+		const int k = screenH / srcH;
+		const int border = screenH - k * srcH;
+		if ((k >= 1) && (border <= 32))
+		{
+			*scale = (float)k;
+			*offset = (float)((border / 2) & ~1);
+			return;
+		}
+	}
+	*scale = (srcH > 0) ? (float)screenH / (float)srcH : 1.0f;
+	*offset = 0.0f;
+}
+
 internal void Ps2Renderer_FlushQueue(void)
 {
 	s_stats.queueFlushes++;
@@ -855,12 +878,9 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 	s_gs->Interlace = GS_INTERLACED;
 	s_gs->Field = GS_FIELD;
 	s_gs->Width = 640;
-	// CTR dibuja 512x216. Con 448 lineas cada linea de PS1 ocupaba 2,07 lineas
-	// del GS: unas filas salian dobles y otras triples (sombras de letras que se
-	// mueven 1 pixel, imagen de la pausa 1 pixel mas abajo). Con 432 = 216 x 2
-	// cada linea ocupa exactamente 2. Se centra bajando 8 lineas.
-	s_gs->Height = 432;
-	s_gs->StartYOffset += 8;
+	s_gs->Height = 448;
+	// (La escala vertical exacta x2 se hace al dibujar: ver Ps2Renderer_VMap.
+	// Cambiar el modo de pantalla a 432 lineas se veia mal en la PS2 real.)
 
 	// Framebuffer de 16 bits: PS1 trabaja con color de 15 bits, asi que no se
 	// pierde nada y queda casi el doble de memoria del GS para texturas.
@@ -1036,8 +1056,35 @@ void Ps2Renderer_DebugScreen(u8 r, u8 g, u8 b)
 	Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
 }
 
+// Con la escala x2 quedan 8 lineas arriba y abajo sin usar: se pintan de negro
+// (si no, quedarian restos de un video o de una pantalla de carga).
+global_variable int s_presentedVramThisFrame = 0;
+
+internal void Ps2Renderer_ClearBorders(void)
+{
+	if (s_presentedVramThisFrame)
+	{
+		return; // imagen de VRAM a pantalla completa (videos, cargas)
+	}
+	float vs, vo;
+	Ps2Renderer_VMap(s_projectionH, &vs, &vo);
+	if (vo <= 0.0f)
+	{
+		return;
+	}
+	const float bottom = vo + vs * (float)s_projectionH;
+	s_gs->PrimAlphaEnable = GS_SETTING_OFF;
+	gsKit_set_scissor(s_gs, GS_SCISSOR_RESET);
+	gsKit_prim_sprite(s_gs, 0.0f, 0.0f, (float)s_gs->Width, vo, 0, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));
+	gsKit_prim_sprite(s_gs, 0.0f, bottom, (float)s_gs->Width, (float)s_gs->Height, 0, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));
+	Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
+	Ps2Renderer_ApplyScissor();
+}
+
 void NativeRenderer_SwapWindow(void)
 {
+	Ps2Renderer_ClearBorders();
+	s_presentedVramThisFrame = 0;
 	const u32 gsStart = Ps2Prof_Now();
 	Ps2Renderer_FlushQueue();
 	gsKit_finish();
@@ -1199,6 +1246,7 @@ void NativeRenderer_PresentVRAMRect(int x, int y, int w, int h)
 	}
 	s_lastBindValid = 0;
 
+	s_presentedVramThisFrame = 1;
 	s_vramDisplayTexture.Width = w;
 	s_vramDisplayTexture.Height = h;
 	Ps2Renderer_FlushQueue();
@@ -1274,14 +1322,15 @@ void NativeRenderer_Clear(int x, int y, int w, int h, u8 r, u8 g, u8 b)
 	s_stats.gsClears++;
 
 	const float scaleX = (float)s_gs->Width / (float)displayW;
-	const float scaleY = (float)s_gs->Height / (float)displayH;
+	float scaleY, offY;
+	Ps2Renderer_VMap(displayH, &scaleY, &offY);
 
 	s_drawGeneration++;
 	s_gs->PrimAlphaEnable = GS_SETTING_OFF;
 	gsKit_set_scissor(s_gs, GS_SCISSOR_RESET);
 	gsKit_prim_sprite(s_gs,
-	                  (float)(overlapX - displayX) * scaleX, (float)(overlapY - displayY) * scaleY,
-	                  (float)(overlapRight - displayX) * scaleX, (float)(overlapBottom - displayY) * scaleY,
+	                  (float)(overlapX - displayX) * scaleX, (float)(overlapY - displayY) * scaleY + offY,
+	                  (float)(overlapRight - displayX) * scaleX, (float)(overlapBottom - displayY) * scaleY + offY,
 	                  0, GS_SETREG_RGBAQ(r, g, b, 0x80, 0x00));
 	Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
 	Ps2Renderer_ApplyScissor();
@@ -1496,7 +1545,13 @@ internal void Ps2Renderer_ReadRect(u16 *dst, int dstStride, int x, int y, int w,
 			if (haveGs && (vx >= surface->x) && (vx < surface->x + surface->w) && (vy >= surface->y) && (vy < surface->y + surface->h))
 			{
 				const int gx = ((vx - surface->x) * s_gs->Width) / surface->w;
-				const int gy = ((vy - surface->y) * s_gs->Height) / surface->h;
+				float vs, vo;
+				Ps2Renderer_VMap(surface->h, &vs, &vo);
+				int gy = (int)vo + (int)((float)(vy - surface->y) * vs);
+				if (gy >= s_gs->Height)
+				{
+					gy = s_gs->Height - 1;
+				}
 				// Lo dibujado en PS1 no lleva bit STP.
 				out[col] = (u16)(s_readbackPixels[gy * s_gs->Width + gx] & 0x7fff);
 			}
@@ -1631,17 +1686,21 @@ void NativeRenderer_SetupClipMode(const RECT16 *clipRect, const DISPENV *display
 			const int relX = clipRect->x - displayEnv->disp.x;
 			const int relY = clipRect->y - displayEnv->disp.y;
 
-			// Solo hace falta recortar si el area no cubre toda la pantalla.
-			if ((relX > 0) || (relY > 0) || (clipRect->w < displayEnv->disp.w) || (clipRect->h < displayEnv->disp.h))
+			float vs, vo;
+			Ps2Renderer_VMap(displayEnv->disp.h, &vs, &vo);
+			// Solo hace falta recortar si el area no cubre toda la pantalla (o si
+			// hay borde arriba/abajo por la escala x2: no pintar en el borde).
+			if ((relX > 0) || (relY > 0) || (clipRect->w < displayEnv->disp.w) || (clipRect->h < displayEnv->disp.h) || (vo > 0.0f))
 			{
 				const float scaleX = (float)s_gs->Width / (float)displayEnv->disp.w;
-				const float scaleY = (float)s_gs->Height / (float)displayEnv->disp.h;
+				float scaleY, offY;
+				Ps2Renderer_VMap(displayEnv->disp.h, &scaleY, &offY);
 
 				on = 1;
 				box[0] = (int)((float)relX * scaleX);
-				box[1] = (int)((float)relY * scaleY);
+				box[1] = (int)((float)relY * scaleY + offY);
 				box[2] = (int)((float)(relX + clipRect->w) * scaleX) - 1;
-				box[3] = (int)((float)(relY + clipRect->h) * scaleY) - 1;
+				box[3] = (int)((float)(relY + clipRect->h) * scaleY + offY) - 1;
 
 				if (box[0] < 0)
 				{
@@ -1728,7 +1787,8 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 	}
 
 	const float scaleX = (float)s_gs->Width / (float)s_projectionW;
-	const float scaleY = (float)s_gs->Height / (float)s_projectionH;
+	float scaleY, offY;
+	Ps2Renderer_VMap(s_projectionH, &scaleY, &offY);
 	const int textured = (s_currentTexture == PS2_TEXTURE_ID_VRAM);
 	GSTEXTURE tex;
 
@@ -1786,14 +1846,15 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 
 				// Coordenadas de VRAM de PS1 -> pixeles del framebuffer del GS.
 				const float surfScaleX = (float)s_gs->Width / (float)s_boundSurface->w;
-				const float surfScaleY = (float)s_gs->Height / (float)s_boundSurface->h;
+				float surfScaleY, surfOffY;
+				Ps2Renderer_VMap(s_boundSurface->h, &surfScaleY, &surfOffY);
 				const float baseX = (float)(Ps2Tex_PageX(v0->page) - s_boundSurface->x);
 				const float baseY = (float)(Ps2Tex_PageY(v0->page) - s_boundSurface->y);
 
 				for (int k = 0; k < 3; k++)
 				{
 					uv[k][0] = (baseX + uv[k][0]) * surfScaleX;
-					uv[k][1] = (baseY + uv[k][1]) * surfScaleY;
+					uv[k][1] = (baseY + uv[k][1]) * surfScaleY + surfOffY;
 				}
 			}
 
@@ -1803,9 +1864,9 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 			}
 
 			gsKit_prim_triangle_goraud_texture_3d(s_gs, &tex,
-			                                      v0->x * scaleX, v0->y * scaleY, 0, uv[0][0], uv[0][1],
-			                                      v1->x * scaleX, v1->y * scaleY, 0, uv[1][0], uv[1][1],
-			                                      v2->x * scaleX, v2->y * scaleY, 0, uv[2][0], uv[2][1],
+			                                      v0->x * scaleX, v0->y * scaleY + offY, 0, uv[0][0], uv[0][1],
+			                                      v1->x * scaleX, v1->y * scaleY + offY, 0, uv[1][0], uv[1][1],
+			                                      v2->x * scaleX, v2->y * scaleY + offY, 0, uv[2][0], uv[2][1],
 			                                      Ps2Renderer_VertexColor(v0, 0x80),
 			                                      Ps2Renderer_VertexColor(v1, 0x80),
 			                                      Ps2Renderer_VertexColor(v2, 0x80));
@@ -1819,9 +1880,9 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 			s_stats.untexturedTris++;
 			// Sin textura, el alfa del vertice es directamente el factor de mezcla.
 			gsKit_prim_triangle_gouraud_3d(s_gs,
-			                               v0->x * scaleX, v0->y * scaleY, 0,
-			                               v1->x * scaleX, v1->y * scaleY, 0,
-			                               v2->x * scaleX, v2->y * scaleY, 0,
+			                               v0->x * scaleX, v0->y * scaleY + offY, 0,
+			                               v1->x * scaleX, v1->y * scaleY + offY, 0,
+			                               v2->x * scaleX, v2->y * scaleY + offY, 0,
 			                               Ps2Renderer_VertexColor(v0, s_modeAlpha),
 			                               Ps2Renderer_VertexColor(v1, s_modeAlpha),
 			                               Ps2Renderer_VertexColor(v2, s_modeAlpha));
