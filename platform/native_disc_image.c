@@ -493,6 +493,14 @@ internal int NativeDiscImage_Ps2JobCollect(int wait)
 		Ps2Cd_AsyncWait();
 	}
 	const int state = Ps2Cd_AsyncPoll();
+	if (state == 0)
+	{
+		// La lectura pedida ya no esta (alguien la recogio): pedirla otra vez.
+		s_ps2JobPending = 0;
+		s_ps2JobErrors++;
+		printf("[CTR PS2] carga en 2o plano: lectura perdida en lba %u\n", (unsigned)s_ps2JobBlockLba);
+		return -1;
+	}
 	if (state < 2)
 	{
 		return 0;
@@ -528,6 +536,18 @@ internal void NativeDiscImage_Ps2JobStop(void)
 		s_ps2JobPending = 0;
 	}
 	s_ps2JobActive = 0;
+}
+
+// Vigilante: estado de la carga en curso (se llama desde otro hilo, solo lee).
+int Ps2Cd_AsyncGetState(void);
+extern volatile int g_ps2CdWhere;
+volatile int g_ps2JobWhere = 0;
+void NativeDiscImage_Ps2JobDebugPrint(void)
+{
+	printf("[CTR PS2] vigilante: carga activa %d (#%u) | quedan %u sectores (sector %u, lba %u) | bloque pedido %d (lba %u) | lector %d | errores %d | "
+	       "donde carga %d | donde lector %d | leyendo %d | xa leyendo %d\n",
+	       s_ps2JobActive, (unsigned)s_ps2JobLogCount, (unsigned)s_ps2JobRemaining, (unsigned)s_ps2JobSector, (unsigned)(s_ps2JobFile.lba + s_ps2JobSector),
+	       s_ps2JobPending, (unsigned)s_ps2JobBlockLba, Ps2Cd_AsyncGetState(), s_ps2JobErrors, g_ps2JobWhere, g_ps2CdWhere, g_ps2DiscReadBusy, g_ps2DiscXaRead);
 }
 
 // 1 si se puede leer en segundo plano (imagen en el disco de la PS2).

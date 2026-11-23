@@ -48,6 +48,7 @@ int boolDecodeXaDuringVsyncCallback;
 int NativeDiscImage_Ps2JobCanStart(void);
 int NativeDiscImage_Ps2JobStart(const struct NativeDiscImageFile *file, u32 sector, u32 sectorCount, void *dst);
 int NativeDiscImage_Ps2JobStep(int mayBlock);
+extern volatile int g_ps2JobWhere;
 global_variable int s_ps2CdJobActive = 0;
 global_variable CdlCB s_ps2CdJobCallback = NULL;
 global_variable int s_ps2CdJobInPump = 0;
@@ -71,7 +72,9 @@ void NativeCD_Ps2Pump(void)
 		return;
 	}
 	s_ps2CdJobInPump = 1;
+	g_ps2JobWhere = 1;
 	const int result = NativeDiscImage_Ps2JobStep(0);
+	g_ps2JobWhere = 0;
 	s_ps2CdJobInPump = 0;
 	// El callback va fuera del cerrojo: si el juego empieza otra lectura desde
 	// el callback y espera en un bucle, esa lectura tiene que poder avanzar.
@@ -90,10 +93,12 @@ void NativeCD_Ps2Finish(void)
 		return;
 	}
 	int result;
+	g_ps2JobWhere = 2;
 	do
 	{
 		result = NativeDiscImage_Ps2JobStep(1);
 	} while (result == 0);
+	g_ps2JobWhere = 0;
 	NativeCD_Ps2JobDone(result);
 }
 
