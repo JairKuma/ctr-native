@@ -87,6 +87,13 @@ void Platform_LogInit(const char *appName)
 		}
 	}
 
+#if defined(CTR_PS2)
+	// PS2: no hay donde escribir un archivo de log (la carpeta base es rom0:
+	// o el disco, de solo lectura). Los mensajes siguen saliendo por la
+	// consola (IOP Console / emuLog de PCSX2).
+	s_logStream = NULL;
+	return;
+#endif
 	s_logStream = fopen(s_logPath, "wb");
 
 	if (s_logStream == NULL)
