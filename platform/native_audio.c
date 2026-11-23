@@ -2962,9 +2962,9 @@ internal int NativeAudio_XaStreamDecodeNextSectorNoLock(void)
 
 #if defined(CTR_PS2)
 #define PS2_XAHW_AHEAD_SECONDS_X10 20 // leer por adelantado (2,0 s)
-#define PS2_XAHW_LOW_MS 300            // si queda menos de esto leido: pausa
-#define PS2_XAHW_RESUME_MS 600         // y se sigue al tener esto
-#define PS2_XAHW_PREFILL_MS 500        // antes de empezar a sonar
+#define PS2_XAHW_LOW_MS 150            // si queda menos de esto leido: pausa
+#define PS2_XAHW_RESUME_MS 400         // y se sigue al tener esto
+#define PS2_XAHW_PREFILL_MS 250        // antes de empezar a sonar
 
 internal u64 Ps2XaHw_MsToFrames(int ms)
 {
