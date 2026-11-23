@@ -292,6 +292,11 @@ static u32 s_ps2XaAsyncLba = 0;      // primer sector (crudo) del bloque
 static u32 s_ps2XaAsyncSkip = 0;     // bytes a saltar en el buffer
 static u32 s_ps2XaAsyncSize = 0;     // bytes utiles
 
+internal void NativeDiscImage_SelectCacheSlot(u32 lba);
+internal int NativeDiscImage_ReadDataSector(u32 lba, u8 *payload);
+internal u32 NativeDiscImage_DataSectorCount(u32 size);
+
+
 // Recoge el bloque si ya ha llegado. 1 = hay datos nuevos en el hueco de la XA.
 int NativeDiscImage_Ps2XaAsyncPoll(void)
 {
@@ -397,6 +402,231 @@ int NativeDiscImage_Ps2IsCached(u32 lba)
 		}
 	}
 	return 0;
+}
+
+// --- Cargas del juego en segundo plano (CdRead con callback) ------------------
+// En PS1, CdRead con callback vuelve al momento y el lector trabaja solo: el
+// juego sigue dibujando (bandera, LOADING) y el callback llega al acabar. Antes
+// el port leia el archivo entero dentro de CdRead y la imagen se congelaba.
+// Ahora se pide cada bloque de 64 sectores al lector en segundo plano (el mismo
+// mecanismo que la XA; solo una lectura a la vez, comparten el buffer porque
+// cada uno recoge su bloque antes de que se pueda pedir otro) y se copia al
+// destino del juego desde la cache. native_cd.c lo avanza en cada VSync.
+static int s_ps2JobActive = 0;
+static struct NativeDiscImageFile s_ps2JobFile;
+static u32 s_ps2JobSector = 0;
+static u32 s_ps2JobRemaining = 0;
+static u8 *s_ps2JobDst = NULL;
+static int s_ps2JobPending = 0;   // 1 = hay un bloque pedido al lector
+static u32 s_ps2JobBlockLba = 0;
+static u32 s_ps2JobBlockSkip = 0;
+static u32 s_ps2JobBlockSize = 0;
+static int s_ps2JobErrors = 0;
+// Estadisticas (log cada 20 archivos).
+static u32 s_ps2JobStatFiles = 0;
+static u32 s_ps2JobStatSectors = 0;
+static u32 s_ps2JobStatBlocks = 0;
+static u32 s_ps2JobStatForced = 0;
+
+// 1 si el sector esta en un hueco de datos del juego (no en el de la XA).
+internal int NativeDiscImage_Ps2GameSlotHas(u32 lba)
+{
+	for (int i = 0; i < NATIVE_DISC_IMAGE_XA_SLOT; i++)
+	{
+		const u32 start = (i == s_nativeDiscImageActiveSlot) ? s_nativeDiscImageCacheStart : s_nativeDiscImageSlotStart[i];
+		const u32 count = (i == s_nativeDiscImageActiveSlot) ? s_nativeDiscImageCacheCount : s_nativeDiscImageSlotCount[i];
+		if ((count != 0) && (lba >= start) && (lba < start + count))
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+// Pide al lector el bloque que empieza en 'lba'. 1 = pedido, 0 = lector
+// ocupado (probar luego), -1 = no se puede (leer de la forma normal).
+internal int NativeDiscImage_Ps2JobRequest(u32 lba)
+{
+	const u32 offset = lba * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE;
+	if ((lba >= 0x1C0000u) || (offset >= s_ps2CdSize))
+	{
+		return -1;
+	}
+	u32 size = NATIVE_DISC_IMAGE_CACHE_BYTES;
+	if (size > s_ps2CdSize - offset)
+	{
+		size = s_ps2CdSize - offset;
+	}
+	const u32 firstSector = offset / NATIVE_PS2_CD_SECTOR;
+	const u32 skip = offset % NATIVE_PS2_CD_SECTOR;
+	u32 count = (skip + size + NATIVE_PS2_CD_SECTOR - 1) / NATIVE_PS2_CD_SECTOR;
+	if (count > NATIVE_PS2_CD_BUF_SECTORS)
+	{
+		count = NATIVE_PS2_CD_BUF_SECTORS;
+		size = count * NATIVE_PS2_CD_SECTOR - skip;
+	}
+	if (size < NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE)
+	{
+		return -1;
+	}
+	if (!Ps2Cd_AsyncStart(s_ps2CdLsn + firstSector, count, s_ps2XaAsyncBuf))
+	{
+		return 0;
+	}
+	s_ps2JobPending = 1;
+	s_ps2JobBlockLba = lba;
+	s_ps2JobBlockSkip = skip;
+	s_ps2JobBlockSize = size;
+	return 1;
+}
+
+// Recoge el bloque pedido. 1 = ya esta en la cache, 0 = aun leyendo, -1 = error.
+internal int NativeDiscImage_Ps2JobCollect(int wait)
+{
+	if (!s_ps2JobPending)
+	{
+		return 1;
+	}
+	if (wait)
+	{
+		Ps2Cd_AsyncWait();
+	}
+	const int state = Ps2Cd_AsyncPoll();
+	if (state < 2)
+	{
+		return 0;
+	}
+	s_ps2JobPending = 0;
+	Ps2Cd_AsyncConsume();
+	if (state != 2)
+	{
+		s_ps2JobErrors++;
+		return -1;
+	}
+	// Meter el bloque en un hueco de datos del juego (el menos usado).
+	const int savedXaRead = g_ps2DiscXaRead;
+	g_ps2DiscXaRead = 0;
+	NativeDiscImage_SelectCacheSlot(s_ps2JobBlockLba);
+	g_ps2DiscXaRead = savedXaRead;
+	const u32 sectors = s_ps2JobBlockSize / NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE;
+	memcpy(s_nativeDiscImageCache, s_ps2XaAsyncBuf + s_ps2JobBlockSkip, sectors * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE);
+	s_nativeDiscImageCacheStart = s_ps2JobBlockLba;
+	s_nativeDiscImageCacheCount = sectors;
+	s_ps2JobStatBlocks++;
+	return 1;
+}
+
+internal void NativeDiscImage_Ps2JobStop(void)
+{
+	if (s_ps2JobPending)
+	{
+		// No dejar el lector "terminado sin recoger": la XA no podria pedir.
+		Ps2Cd_AsyncWait();
+		Ps2Cd_AsyncPoll();
+		Ps2Cd_AsyncConsume();
+		s_ps2JobPending = 0;
+	}
+	s_ps2JobActive = 0;
+}
+
+// 1 si se puede leer en segundo plano (imagen en el disco de la PS2).
+int NativeDiscImage_Ps2JobCanStart(void)
+{
+	return s_ps2CdDirect && !s_ps2JobActive;
+}
+
+int NativeDiscImage_Ps2JobStart(const struct NativeDiscImageFile *file, u32 sector, u32 sectorCount, void *dst)
+{
+	if ((file == NULL) || (dst == NULL) || (sectorCount == 0) || !NativeDiscImage_Ps2JobCanStart())
+	{
+		return 0;
+	}
+	const u32 fileSectorCount = NativeDiscImage_DataSectorCount(file->size);
+	if ((sector > fileSectorCount) || (sectorCount > fileSectorCount - sector))
+	{
+		return 0;
+	}
+	s_ps2JobFile = *file;
+	s_ps2JobSector = sector;
+	s_ps2JobRemaining = sectorCount;
+	s_ps2JobDst = (u8 *)dst;
+	s_ps2JobErrors = 0;
+	s_ps2JobActive = 1;
+	s_ps2JobStatFiles++;
+	s_ps2JobStatSectors += sectorCount;
+	return 1;
+}
+
+// Avanza la carga. mayBlock = 0: sin esperar nunca al lector (desde VSync).
+// mayBlock = 1: hasta el final, esperando (el juego necesita el lector ya).
+// Devuelve 0 = sigue, 1 = terminada bien, -1 = error.
+int NativeDiscImage_Ps2JobStep(int mayBlock)
+{
+	if (!s_ps2JobActive)
+	{
+		return 1;
+	}
+	if (mayBlock)
+	{
+		s_ps2JobStatForced++;
+	}
+	u32 copied = 0;
+	while (s_ps2JobRemaining != 0)
+	{
+		const u32 lba = s_ps2JobFile.lba + s_ps2JobSector;
+		if (!NativeDiscImage_Ps2GameSlotHas(lba))
+		{
+			if (s_ps2JobPending)
+			{
+				const int r = NativeDiscImage_Ps2JobCollect(mayBlock);
+				if (r == 0)
+				{
+					return 0; // aun leyendo: el juego sigue
+				}
+				if ((r < 0) && (s_ps2JobErrors > 3))
+				{
+					NativeDiscImage_Ps2JobStop();
+					printf("[CTR PS2] carga en 2o plano: error de lectura en lba %u\n", (unsigned)lba);
+					return -1;
+				}
+				continue;
+			}
+			if (!mayBlock)
+			{
+				const int r = NativeDiscImage_Ps2JobRequest(lba);
+				if (r >= 0)
+				{
+					return 0; // pedido (o lector ocupado): seguir en el siguiente VSync
+				}
+				// r < 0: se lee de la forma normal (abajo).
+			}
+		}
+		if (!mayBlock && (copied >= 256))
+		{
+			return 0; // no gastar demasiado de un fotograma copiando
+		}
+		if (!NativeDiscImage_ReadDataSector(lba, s_ps2JobDst))
+		{
+			NativeDiscImage_Ps2JobStop();
+			printf("[CTR PS2] carga en 2o plano: fallo en lba %u\n", (unsigned)lba);
+			return -1;
+		}
+		s_ps2JobDst += NATIVE_DISC_IMAGE_FORM1_DATA_SIZE;
+		s_ps2JobSector++;
+		s_ps2JobRemaining--;
+		copied++;
+	}
+	NativeDiscImage_Ps2JobStop();
+	if (s_ps2JobStatFiles >= 20)
+	{
+		printf("[CTR PS2] cargas en 2o plano: archivos %u | %u KB | bloques %u | esperas forzadas %u\n", (unsigned)s_ps2JobStatFiles,
+		       (unsigned)(s_ps2JobStatSectors * 2u), (unsigned)s_ps2JobStatBlocks, (unsigned)s_ps2JobStatForced);
+		s_ps2JobStatFiles = 0;
+		s_ps2JobStatSectors = 0;
+		s_ps2JobStatBlocks = 0;
+		s_ps2JobStatForced = 0;
+	}
+	return 1;
 }
 
 // Elige el hueco que contiene 'lba', o si ninguno, el menos usado (vacio).

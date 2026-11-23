@@ -42,6 +42,66 @@ global_variable s32 s_nativeCdCurrentSector;
 
 int boolDecodeXaDuringVsyncCallback;
 
+#if defined(CTR_PS2)
+// PS2: CdRead con callback se lee en segundo plano (native_disc_image.c), como
+// en PS1: el juego sigue dibujando y el callback llega desde VSync al acabar.
+int NativeDiscImage_Ps2JobCanStart(void);
+int NativeDiscImage_Ps2JobStart(const struct NativeDiscImageFile *file, u32 sector, u32 sectorCount, void *dst);
+int NativeDiscImage_Ps2JobStep(int mayBlock);
+global_variable int s_ps2CdJobActive = 0;
+global_variable CdlCB s_ps2CdJobCallback = NULL;
+global_variable int s_ps2CdJobInPump = 0;
+
+internal void NativeCD_Ps2JobDone(int result)
+{
+	CdlCB callback = s_ps2CdJobCallback;
+	s_ps2CdJobActive = 0;
+	s_ps2CdJobCallback = NULL;
+	if (callback != NULL)
+	{
+		callback((result > 0) ? CdlComplete : CdlDiskError, 0);
+	}
+}
+
+// Avanza la carga en curso sin esperar al lector (ps2_platform.c, en VSync).
+void NativeCD_Ps2Pump(void)
+{
+	if (!s_ps2CdJobActive || s_ps2CdJobInPump)
+	{
+		return;
+	}
+	s_ps2CdJobInPump = 1;
+	const int result = NativeDiscImage_Ps2JobStep(0);
+	if (result != 0)
+	{
+		NativeCD_Ps2JobDone(result);
+	}
+	s_ps2CdJobInPump = 0;
+}
+
+// El juego va a usar el lector para otra cosa: acabar antes la carga en curso
+// (en PS1 una orden nueva cortaria la lectura; el juego no lo hace a proposito).
+void NativeCD_Ps2Finish(void)
+{
+	if (!s_ps2CdJobActive)
+	{
+		return;
+	}
+	int result;
+	do
+	{
+		result = NativeDiscImage_Ps2JobStep(1);
+	} while (result == 0);
+	NativeCD_Ps2JobDone(result);
+}
+
+// 1 si hay una carga en segundo plano en marcha.
+int NativeCD_Ps2Busy(void)
+{
+	return s_ps2CdJobActive;
+}
+#endif
+
 internal s32 NativeCD_NormalizeFilename(char *dst, s32 dstCount, const char *src)
 {
 	NativeStr8 filename = NativeStr8_FromCString(src);
@@ -327,6 +387,9 @@ CdlLOC *CdIntToPos(int val, CdlLOC *p)
 
 CdlFILE *CdSearchFile(CdlFILE *loc, char *filename)
 {
+#if defined(CTR_PS2)
+	NativeCD_Ps2Finish();
+#endif
 	if (NativeCD_SearchFile(loc, filename) == 0)
 	{
 		return NULL;
@@ -338,6 +401,14 @@ CdlFILE *CdSearchFile(CdlFILE *loc, char *filename)
 int CdControl(uint8_t com, uint8_t *param, uint8_t *result)
 {
 	(void)result;
+
+#if defined(CTR_PS2)
+	if ((com == CdlSetloc) || (com == CdlPlay) || (com == CdlReadN) || (com == CdlPause) || (com == CdlSetmode) || (com == CdlSeekL) ||
+	    (com == CdlSeekP) || (com == CdlReadS))
+	{
+		NativeCD_Ps2Finish();
+	}
+#endif
 
 	NativeCD_SetLastCom(com);
 
@@ -366,6 +437,21 @@ int CdRead(int sectors, u32 *buf, int mode)
 {
 	(void)mode;
 
+#if defined(CTR_PS2)
+	NativeCD_Ps2Finish();
+	if ((s_nativeCdReadCallback != NULL) && (sectors > 0) && (buf != NULL) && (s_nativeCdCurrentFile >= 0) && (s_nativeCdCurrentFile < s_nativeCdFileCount) &&
+	    (s_nativeCdFiles[s_nativeCdCurrentFile].source == NATIVE_CD_FILE_DISC) && NativeDiscImage_Ps2JobCanStart())
+	{
+		if (NativeDiscImage_Ps2JobStart(&s_nativeCdFiles[s_nativeCdCurrentFile].discFile, (u32)s_nativeCdCurrentSector, (u32)sectors, buf))
+		{
+			s_ps2CdJobCallback = s_nativeCdReadCallback;
+			s_ps2CdJobActive = 1;
+			s_nativeCdCurrentSector += sectors;
+			return 1;
+		}
+	}
+#endif
+
 	NativeCD_ReadSectors(sectors, buf);
 
 	if (s_nativeCdReadCallback != 0)
@@ -381,5 +467,15 @@ int CdReadSync(int mode, uint8_t *result)
 	(void)mode;
 	(void)result;
 
+#if defined(CTR_PS2)
+	if (mode == 0)
+	{
+		NativeCD_Ps2Finish();
+	}
+	else if (s_ps2CdJobActive)
+	{
+		return 1; // aun leyendo
+	}
+#endif
 	return 0;
 }
