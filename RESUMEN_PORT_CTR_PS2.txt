@@ -1,0 +1,304 @@
+RESUMEN DEL PORT DE CRASH TEAM RACING (CTR Native) A PS2
+=========================================================
+Fecha: 23-11-2026, version 7 (vibracion PROBADA OK; arreglo del boton ANALOG; colores de arranque apagados)
+Idioma: hablar SIEMPRE en español. El usuario no sabe programar: guiarle paso a paso.
+
+1. OBJETIVO
+-----------
+- Portar CTR (PS1) a PS2 usando el código de "CTR Native" (basado en la decompilación CTR-ModSDK).
+- Metas: mejor rendimiento y gráficos, bots que usen más objetos, añadir personajes y mapas
+  sin reemplazar los existentes.
+- Jugar en PS2 real con OPL + MX4SIO.
+- Mandos: el DualShock de PS1 (0x73) y el DualShock 2 deben funcionar ambos, como en cualquier
+  juego de PS2 (sin modo de presión ni reglas especiales para 0x79).
+
+2. CÓMO SE COMPILA Y SE PRUEBA
+------------------------------
+- El usuario tiene un fork en GitHub. Compila GitHub Actions (.github/workflows/ps2.yml) con el
+  contenedor ps2dev/ps2dev:latest y "make -f Makefile.ps2".
+  El artefacto "ctr_ps2" trae ctr_ps2.elf y build-log.txt.
+- Si la compilación sale en rojo: Actions -> build-ps2 -> paso "Build ctr_ps2.elf" -> buscar "error:".
+- Los archivos se suben por la web de GitHub ("Add file" -> "Upload files" o "Create new file"
+  con la ruta). Arrastrar carpetas no funciona. Los zips que prepara Claude llevan la ruta de
+  cada archivo (main_ps2.c y Makefile.ps2 van en la carpeta principal del repo).
+- Emulador: PCSX2 1.6.0 en un VPS con Windows Server 2012 R2 (hay que mantener "IOP Console"
+  activado para ver los logs). El emuLog está en la carpeta logs de PCSX2.
+  OJO con el VPS: no tiene gráfica y solo 2 núcleos. Con la ventana de PCSX2 en primer plano el
+  emulador baja de velocidad ("Speed: 60-70%") y el SONIDO DEL EMULADOR se entrecorta ("DSound
+  buffer lock failure"): eso es del VPS, no del juego. En segundo plano suena bien, pero LilyPad
+  puede perder las teclas: se arregla reiniciando PCSX2.
+  Los porcentajes del medidor y los fps de "perf:" se miden con el reloj de la PS2 emulada y
+  siguen valiendo aunque el VPS vaya lento.
+- ISO (CD/DVD-ROM Generator 2.0 -> exportar IML -> generar ISO). Contenido:
+    SYSTEM.CNF   -> BOOT2 = cdrom0:\CTRN_001.00;1 / VER = 1.00 / VMODE = NTSC (líneas CRLF)
+    CTRN_001.00  -> el ctr_ps2.elf renombrado
+    CTR_U.BIN    -> la imagen del CTR de PS1 (nombre corto, en mayúsculas, con guion bajo)
+    DUMMY        -> relleno de 700 MB (fsutil file createnew DUMMY 734003200), porque el
+                    programa exige al menos 600000 sectores para un DVD
+- En PCSX2 se prueba con "Boot CDVD (full)".
+- PS2 real: OPL + MX4SIO. No hay log. Colores de arranque: DESACTIVADOS desde la version 7
+  (main_ps2.c, PS2_DEBUG_COLORS 0: arranca en negro). Para un fallo de arranque, ponerlo a 1.
+  El rojo (CTR_U.BIN no encontrado) sale siempre. Significado de los colores:
+    azul = GS iniciado
+    morado = XSIO2MAN
+    rosa = XMCMAN
+    naranja = XMCSERV
+    amarillo = XPADMAN
+    azul claro = LIBSD
+    blanco = audsrv.irx
+    turquesa = ctrspu2.irx (sonido por el chip SPU2)
+    gris = audsrv init
+    verde = CTR_U.BIN encontrado
+    rojo = no encontrado
+
+3. ARQUITECTURA (repo ctr-native-master)
+----------------------------------------
+- Build unity: main_ps2.c incluye todo el juego (game/*.c) y los archivos comunes de platform/,
+  más los específicos de PS2. No usa SDL ni OpenGL.
+- Makefile.ps2:
+    EE_OBJS = main_ps2.o platform/ps2/ps2_cd.o platform/ps2/ps2_spu2.o audsrv_irx.o ctrspu2_irx.o
+    EE_LIBS = -lgskit -ldmakit -lpadx -lcdvd -laudsrv -lpatches -lm
+      (libpadx = librería de mandos para XPADMAN; antes era -lpad)
+    CFLAGS: -DCTR_NATIVE -DCTR_PS2 -fno-strict-aliasing (OBLIGATORIO: sin él falla la cámara
+            de la intro, por gte_ldv0)
+    audsrv.irx se incrusta con bin2c. ctrspu2.irx (modulo propio del IOP, carpeta iop/ctrspu2)
+    se compila con "make -C iop/ctrspu2" (compilador del IOP, viene en ps2dev) y tambien se
+    incrusta con bin2c.
+- main_ps2.c:
+    1. Inicia el GS y pone la pantalla azul.
+    2. Carga los módulos de rom0 en versión "X": XSIO2MAN, XMCMAN, XMCSERV, XPADMAN, LIBSD
+       (si no existen, prueba los antiguos), luego sbv_patch_enable_lmb, audsrv.irx y
+       ctrspu2.irx (interruptor PS2_USE_SPU2: 1 = voces en el chip SPU2; 0 = por software).
+       IMPORTANTE: con los módulos ANTIGUOS (SIO2MAN/MCMAN/MCSERV/PADMAN), en la PS2 real con
+       MX4SIO el mando salía "controller 1 is unplugged!" y al tocar la memory card el juego se
+       congelaba (imagen y sonido) en la bandera. Con los X funciona todo.
+    3. Interruptor PS2_USE_MEMCARD (1 = partidas en mc0:/CTRNATIVE; 0 = sin memory card,
+       rutas en rom0: que fallan al momento). Está en 1.
+    4. Busca CTR_U.BIN: carpeta del ELF, luego cdrom0:\CTR_U.BIN, luego host:, mass:.
+    5. Con disco: base "rom0:" y g_ps2AssetsDiscOnly = 1 (no busca archivos sueltos).
+- platform/ps2/ps2_platform.c:
+    - Platform_*, VSync, interrupción VBlank (s_hwVBlankCount).
+    - Ps2_CatchUpDueVBlanks entrega al juego todos los VBlanks pasados (máximo 60 = 1 s).
+    - La interrupción llama a Ps2AudioOut_OnVBlankIsr() (despierta el hilo de audio).
+    - Mide el tiempo libre (espera al VBlank) para el medidor de CPU.
+- platform/ps2/ps2_renderer.c:
+    - gsKit, framebuffer CT16S 640x448 NTSC. Caché de texturas (PSMT4/PSMT8 y CLUT -> CT32).
+    - Superficies de framebuffer (s_fbSurfaces): cuando el juego usa como textura una zona de VRAM
+      que el GS ha dibujado, se lee DIRECTAMENTE del buffer del GS ("fb-tex" en el log).
+    - Línea "perf:" cada 10 s. Mide el tiempo de envío al GS para el medidor.
+- platform/ps2/ps2_input.c: libpadx (XPADMAN), puertos 1 y 2. Sin vibración ni multitap.
+    - Al conectar el mando se pone en modo analogico (padSetMainMode DUALSHOCK, SIN bloquear:
+      el boton ANALOG lo puede apagar). Probado en PS2 real: joysticks desde el principio.
+    - Mientras el mando cambia de modo (boton ANALOG) no se puede leer: se mantiene como
+      conectado hasta 90 frames (botones sueltos, sticks al centro). Antes salia un segundo
+      "controller 1 is unplugged". Probado en PS2 real: arreglado.
+    - ID 0x79 (DualShock 2 con presion) se pasa al juego como 0x73.
+    - Al arrancar, si el mando aun no ha dicho sus modos, se reintenta (hasta 600 frames) y
+      luego se comprueba 3 veces que quedo en analogico (a veces arrancaba apagado). PROBADO OK.
+    - VIBRACION (23-11-2026, PROBADA OK en PS2 real con DualShock 1; misma fuerza que PS1): native_libpad.c (dentro de #if CTR_PS2) llama a
+      Ps2Input_PadInfoAct (motores reales con padInfoAct) y Ps2Input_PadSetMainMode (devuelve 1
+      con offs==1 si hay mando: el juego lo necesita para pasar a usar motores). PadSetAct ->
+      Platform_InputPadVibrate guarda el buffer de 2 bytes del juego (motorSubmit). Al estar el
+      mando estable: padSetActAlign {0,1,ff,ff,ff,ff}; en cada Platform_InputUpdate se envia
+      con padSetActDirect (motor pequeno 0/1, grande 0-255) solo si cambia. Al cambiar de modo
+      o desconectar se vuelve a preparar.
+    - ARREGLO BOTON ANALOG (23-11-2026, PROBADO OK): antes, al apagar ANALOG, la orden
+      padSetActAlign se repetia sin fin (el estado "ocupado" del mando borraba el paso) y el
+      mando iba a tirones o dejaba de responder, incluso al reconectarlo. Ahora los motores se
+      preparan solo cuando cambia el modo (PAD_MODECURID), como mucho 3 intentos, con 120
+      frames de espera maxima, y solo en analogico (en digital no vibra).
+- platform/ps2/include/SDL3/SDL.h: imitación mínima de SDL para native_audio.c.
+- platform/ps2/ps2_audio_out.c (sonido):
+    - El audio se genera según el reloj real (VBlanks de hardware), en el hilo principal, también
+      durante las esperas del lector (PumpIdle).
+    - FIFO propio de 32768 frames (~740 ms). Un HILO de entrega (prioridad 32; el principal 64)
+      se despierta en cada VBlank y pasa del FIFO a audsrv lo que cabe. Si audsrv se queda casi
+      vacío y no hay audio, le manda silencio (si no, audsrv repite su último bloque).
+    - Control de retraso: si FIFO + audsrv pasa de ~267 ms, se tira lo más antiguo hasta ~167 ms
+      ("trimmed" en el log).
+    - LÍMITE DE CPU del sonido: como mucho el 70% del tiempo real. Si se gasta el presupuesto,
+      se salta audio ("saltado N vblanks") y el juego sigue. Sin esto, en la PS2 real el juego
+      se quedaba generando audio sin parar.
+    - MEDIDOR DE CPU (registro Count del COP0, ciclos de la EE). Cada ~5 s imprime:
+        [CTR PS2] audio: sent X KB | fifo N | silence N | dropped N | trimmed N
+        [CTR PS2] audio cpu: voces X% | xa X% (+ disco xa X%) | eco X% | voces sonando N | saltado N vblanks
+        [CTR PS2] cpu: audio X% | cd X% | gs X% | libre X% | juego X%
+- SONIDO POR EL CHIP SPU2 (nuevo, paso 1):
+    - iop/ctrspu2/ctrspu2.irx: servidor SIF RPC en el IOP. Solo usa funciones basicas de la
+      libsd de la BIOS (rom0:LIBSD). Ordenes: PING, BATCH (lista de escrituras de registros,
+      sceSdProcBatch), UPLOAD (copia a la RAM de la SPU2, sceSdVoiceTrans canal DMA 0; audsrv
+      usa el 1), EFFECT (eco, sceSdSetEffectAttr con limpieza de la zona).
+      (El sdrdrv.irx del PS2SDK NO sirve: necesita funciones que la libsd de la BIOS puede no
+      tener.)
+    - platform/ps2/ps2_spu2.c (objeto aparte): las funciones Spu* de native_audio.c apuntan
+      cada cambio en una lista y Ps2Spu2_Flush() la manda en un solo envio por VBlank
+      (desde Ps2_EmitVBlank, despues del callback de VSync del juego). Orden del envio:
+      key off -> cambios de voces -> volumenes generales -> key on.
+    - Core 0 de la SPU2 = la SPU de PS1. La RAM de sonido de PS1 (512 KB) va en 0x100000 de la
+      RAM de la SPU2 (se mantiene la copia en la EE; las subidas se amplian a multiplos de 64).
+      Eco del core 0 al final de 0x1DFFFF. El core 0 sale al core 1 (entrada externa, AVOL).
+    - Tono x 44100/48000 (la SPU2 va a 48 kHz). ADSR y eco ~9% mas rapidos (sin corregir).
+    - La musica XA sigue por software y por audsrv (core 1). Su volumen de entrada (BVOL) se
+      pone a 0x7FFF en cada envio (audsrv lo dejaba a 0x3FFF = la mitad: musica bajita).
+    - Con la SPU2 activa, native_audio.c ya no emula las voces ni el eco.
+    - Si ctrspu2.irx no carga o no responde: sonido por software como antes (automatico).
+    - PASO 2 (ritmo): cada VBlank del juego deja su lista en una COLA y un hilo propio
+      (prioridad 30, despertado por la interrupcion de VBlank) manda UNA lista por VBlank de
+      hardware (varias si hay mas de 6 esperando). Asi las notas no llegan a rafagas cuando el
+      juego va lento. Cerrojo (semaforo) para que solo un envio vaya al IOP a la vez; las
+      subidas de muestras y los cambios de eco vacian antes la cola.
+    - Log nuevo cada ~5 s:
+        [CTR PS2] spu2: envios N | cambios N | notas N | cola max N | subido N KB (total N KB) | eco modo N on/off | errores N | cpu X%
+      ("cola max" = listas esperando como mucho: retraso de la musica en VBlanks)
+      y la linea "cpu:" tiene ahora "spu2 X%".
+- XA (arreglos del 21-11-2026):
+    - Diagnostico en el log: "xa: tipo T n.o N -> ok/FALLO", "xa: parada", "xa: volumen CD",
+      "xa: CD mix" y cada ~5 s "xa estado: ... | en pausa N frames | pico X -> Y".
+      Tipos: 0 = musica (XA/MUSIC), 1 = extras (XA/ENG/EXTRA), 2 = frases (XA/ENG/GAME).
+    - FALLO GRAVE ARREGLADO: mientras el juego leia el disco, el audio se genera durante la
+      espera y la XA leia su siguiente sector usando la cache normal A MITAD de la lectura del
+      juego: cambiaba el hueco activo y los datos quedaban apuntados en el hueco equivocado
+      (el juego podia recibir audio en vez de sus datos) y la XA cortaba la pista (musica de la
+      intro de carrera). Ahora, con el lector ocupado, la XA solo copia del hueco de la XA
+      (NativeDiscImage_Ps2ReadXaSlotUserSector) y si no esta se queda EN PAUSA (no avanza).
+      (Posible relacion con fallos graficos raros como Oxide sin cabeza: comprobar.)
+    - Volumen: el maestro 0x3FFF de PS1 es volumen completo, pero el mezclador lo trataba como
+      la mitad. Con la SPU2 activa la XA usa el maestro x2.
+    - El indice XA/ENG.XNF se lee una sola vez y se guarda (antes, en cada XA: tiron).
+    - XA EN EL CHIP SPU2 (22-11-2026): la XA (ADPCM 4 bits) se REORDENA sin descomprimir en
+      bloques ADPCM de la SPU2 (mismo formato de muestra y filtros; comprobado bit a bit en PC)
+      y suena en las voces 0 (izq.) y 1 (der.) del core 1, en dos anillos de 5760 bloques en
+      0x0A0000 y 0x0C0000 de la RAM de la SPU2. Tono = frecuencia*4096/48000. Se lee ~2 s por
+      delante; si falta, voces a tono 0 y reloj de la XA parado (siguen juntos). El "reloj" de
+      software de la XA sigue avanzando (fin de pista, boca). La boca usa una tabla de picos
+      por tramos de 128 frames calculada al leer cada sector. CPU de la XA: 13-21% -> 2-5%.
+      Log: "xa chip: si | estereo/mono | por delante N ms | ... | pausas N".
+    - LECTURA DE LA XA EN SEGUNDO PLANO (22-11-2026, PROBADO EN PS2): ps2_cd.c tiene
+      Ps2Cd_AsyncStart/Poll/Consume/Wait; la XA pide su bloque de 64 sectores y el juego sigue.
+      Las lecturas normales del juego esperan antes a que acabe la de la XA.
+      Log: "lecturas en 2o plano N (esperas del juego N, xa esperando N)".
+    - ARRANQUE DE CADA XA SIN LEER EL DISCO DE GOLPE (22-11-2026, PROBADO EN PS2):
+        - La XA espera a tener 500 ms leidos para empezar a sonar, pero el juego no espera.
+        - NativeAudio_PrepareXAStream ya no lee nada: el formato (mono/estereo, frecuencia) se
+          averigua con el primer sector del canal (Ps2Xa_LearnFormatNoLock) y la duracion se
+          estima y se corrige con el 2o sector y al llegar al final.
+        - Los archivos XA se buscan en los directorios del disco UNA vez: la primera XA que
+          suena llama a Ps2Xa_PrewarmFiles(), que busca todos (musica, extras, frases) y los
+          guarda (Ps2Xa_FindFileCached, hasta 128). Antes, la primera vez que sonaba cada
+          archivo el lector iba a los directorios del principio del CD (tiron).
+          Log: "xa: N archivos XA buscados por adelantado".
+        - Resultado en PS2 real: carrera entera de Crash Cove y la meta SIN TIRONES; Oxide en
+          la intro sin tirones de sonido y ya no pierde la cabeza.
+- platform/ps2/ps2_cd.c (objeto separado; libcdvd.h choca con el CdRead del juego):
+    - Lectura por sectores con sceCdRead, espera con sceCdSync(1) + Ps2AudioOut_PumpIdle().
+    - Busca CTR_U.BIN leyendo el índice ISO9660 a mano (sceCdSearchFile falla).
+    - Mide el tiempo de espera al lector para el medidor.
+- Cambios en archivos comunes (todos dentro de #if CTR_PS2; el build de PC no cambia):
+    - native_cd.c, native_libapi.c, native_libgpu.c: uint32_t/int32_t -> u32/s32.
+    - native_libgte.c: "stack" renombrado a gteMatrixStack.
+    - native_assets.c / native_cd.c: g_ps2AssetsDiscOnly (no busca archivos sueltos).
+    - native_disc_image.c: lee CTR_U.BIN por sceCdRead. Caché de 6 huecos de 64 sectores raw
+      (LRU). El ÚLTIMO hueco es solo para la música XA (g_ps2DiscXaRead): antes las cargas del
+      juego lo expulsaban y la XA releía con saltos de ~125 ms.
+    - native_audio.c (emulador de la SPU de PS1 + XA), optimizaciones PS2 con resultado
+      IDÉNTICO al original (comprobado con pruebas en PC):
+        - Sin divisiones/multiplicaciones de 64 bits (la EE no las tiene): volúmenes, eco,
+          ADSR, posición de la XA (incremental), número de frames de la XA (en caché).
+        - Eco: filtro FIR simétrico (11 multiplicaciones en vez de 39) y se salta si su
+          historial está a cero.
+        - XA: filtro zig-zag rápido para 37800 y 18900 Hz, los dos canales a la vez, un solo
+          canal si la pista es mono, bucle compacto sin comprobaciones cuando todos los datos
+          están disponibles, y sin reintentar lecturas por cada paso del filtro.
+        - XA "perezosa": lee la pista mientras suena.
+        - Desglose del medidor (voces / xa / disco xa / eco).
+
+3b. GRAFICOS (23-11-2026) - platform/ps2/ps2_renderer.c
+    - EFECTO DEL RELOJ / DEMO / ONDA (DISPLAY_Blur_Main en game/Display.c): lee la imagen del
+      fotograma anterior (POLY_FT4 de 16 bits, 50%) y la mezcla ampliada. En PS1 los pixeles de
+      esa imagen llevan el bit STP (el juego pinta antes toda la pantalla con "poner bit de
+      mascara", e6000001, y luego el propio efecto copia texeles con STP). El GS no guarda eso:
+      se apunta por fotograma (s_frameStp: si se dibuja con SetPSXDrawMaskSet(1) o con texeles
+      de pantalla con stp). Cada zona (Ps2FbSurface) tiene "stp". Al dibujar con una textura que
+      es la pantalla: pasada 1 solo si no stp, pasada 2 solo si stp, y mezcla con factor FIJO
+      (ALPHA C=FIX, Ps2Renderer_SetFixAlpha) = factor del modo. ARREGLADO Y PROBADO: reloj
+      (antes pantalla blanca fija) y demo (antes cuadrados grandes).
+    - Efectos que leen lo que SE ESTA dibujando (native_gpu llama a StoreFrameBuffer antes):
+      ahora se copia el buffer dentro del GS (TRXDIR=2, Ps2Renderer_SnapshotDrawBuffer) a la
+      zona de la textura de PresentVRAMRect (ampliada a 640x448 CT16) y se lee de la copia.
+      Fin de fotograma: Ps2Renderer_StoreDisplayedFrame (ps2_platform.c) apunta el buffer.
+    - Log nuevo cada 10 s: "perf: ... fb-tex N (copias N)" y
+      "fb: 16 bits sin GS N (ultima pag) | zonas: [...] | ultima copia | pasadas saltadas N".
+    - ESCALA VERTICAL: CTR dibuja 512x216 y el GS 640x448 (x2,07): algunas sombras de letras
+      quedan 1 pixel arriba/abajo (CHANGE LEVEL / CHANGE CHARACTER). Probado: modo de 432
+      lineas y escala x2 dentro de 448 -> bien en PCSX2 pero PEOR en la PS2 real (entrelazado).
+      Desactivado (Ps2Renderer_VMap con "if (0 && ...)"). Idea pendiente: modo 240p no
+      entrelazado como la PS1 (1:1 vertical, menos pixeles y memoria = mas rapido), como opcion.
+    - Imagen de la pausa: ya no baja 1 px; queda 1 px a la derecha (escala horizontal 1,25).
+    - Musica XA: ahora empieza con 250 ms leidos (LOW 150, RESUME 400): la ultima vuelta
+      sonaba tarde. PROBADO: suena a tiempo.
+
+4. QUÉ FUNCIONA
+---------------
+- PCSX2: arranca, intro, menús, carreras completas (resultados y Retry).
+- PS2 REAL (OPL + MX4SIO): arranca, pasa la bandera, menú, MANDO FUNCIONA, aventura nueva,
+  GUARDADO EN MEMORY CARD FUNCIONA ("save completed").
+- Sonido limpio (sin dropped ni silencios en la intro de PCSX2).
+- SONIDO EN PS2 REAL (22-11-2026): voces, eco y XA en el chip SPU2; sin tirones en carrera,
+  quejas, ultima vuelta, meta ni en Oxide. Mando analogico desde el principio.
+- Medidas en PCSX2 (intro): XA bajó de ~20-32% a ~7-14%. Logo ~20 fps, siguiente tramo ~39 fps.
+
+5. PROBLEMAS PENDIENTES
+-----------------------
+- PS2 REAL (22-11-2026): menu y carreras sin tirones de sonido. Queda lag en: cargas del juego
+  (antes de la caja, bandera, loading: el juego espera sus propias lecturas), videos de la
+  seleccion de mapa (STR descomprimido por la EE + subidas p16), y escenas con efectos de
+  copia de pantalla (destello de la nave de Oxide, Coco con Pura / Polar en la intro).
+- RELOJ (objeto): pantalla en blanco en vez de la onda (PCSX2 y PS2). Mismo camino "fb-tex"
+  (usa la imagen dibujada como textura) que la demo y las presentaciones de personajes.
+- Menu de pausa: la imagen capturada baja 1 pixel (del port).
+- En carrera 20-27 fps (deberia ser 30): es dibujo/logica (juego 70-85%), no sonido. El log
+  apunta a graficos: pages 2-4 subidas/frame, flushes 8-11/frame, fb-tex a ratos.
+- RENDIMIENTO (lo más importante): en la PS2 real el juego va con lag. Antes del paso SPU2 las
+  VOCES emuladas eran el mayor gasto: ~4% de CPU por voz sonando (13 voces = 51%) y el eco
+  ~13% fijo en carrera. El juego en sí (lógica + dibujado) usa 30-55%.
+- Efecto de la demo de presentación (cuando se deja el juego sin tocar y recorre la pista con
+  una onda): la imagen se junta en cuadrados grandes y se distorsiona. Pasa también en PCSX2.
+  Causa probable: el efecto lee la imagen DEL MISMO buffer del GS en el que está pintando
+  (feedback); en PC se lee de una copia fija hecha al acabar el fotograma. Arreglo: copiar el
+  buffer a otra zona de VRAM del GS antes de leerlo. Problema: la VRAM del GS ya va justa
+  ("ERROR: Not enough VRAM for this allocation!" al arrancar). El mismo camino ("fb-tex") se
+  usa en carrera para algunos efectos.
+- Oxide sin cabeza en la intro (PS2 real): YA NO PASA desde la lectura de la XA en 2o plano.
+- FRANJA EN LA OLA DE LAS BANDERAS: aparece en TODO el juego donde hay bandera ondeando
+  (carga, etc.). Probable: trozos de la onda que no encajan o con la textura equivocada.
+- Sin multitap.
+- Las lecturas del disco cuestan ~25 ms (seguidas) y ~125 ms (con salto); casi todas salen como
+  "SEEK" porque cada bloque empieza un sector antes de donde acabó el anterior (redondeo de
+  sectores de 2352 a 2048). Se puede pulir.
+- "cannot create log file": QUITADO (native_log.c no intenta crear el archivo en PS2).
+  Las lineas de diagnostico del log (perf, audio, spu2, xa...) se dejan de momento: solo salen
+  por la consola y sirven para el trabajo de las cargas.
+
+6. SIGUIENTES PASOS (orden acordado)
+------------------------------------
+1. SONIDO AL CHIP SPU2: TERMINADO (22-11-2026). Mejoras menores para mas adelante: ADSR y
+   eco a 48 kHz (~9% mas rapidos), picos de la boca mas baratos.
+2. GRAFICOS: hecho el efecto del reloj/demo. Pendiente: franja en la ola de las banderas
+   (tambien aparece a veces en circuitos/modo historia al moverse: posible costura entre
+   poligonos o trozos de textura), videos de la seleccion de mapa, letras (modo 240p).
+3. Vibracion: TERMINADA Y PROBADA. Colores de arranque apagados (falta probar la v7).
+   Multitap: pendiente.
+3b. SIGUIENTE TRAS PROBAR LA VIBRACION: CARGAS (lag antes de la caja, LOADING antes del menu y
+   de "race today", lag al salir cada personaje en la intro de Oxide, tiron de sonido antes de
+   la caja): el juego espera sus propias lecturas del disco.
+4. Más adelante: rendimiento (subidas de texturas, GTE en VU0), renderizado fuera de pantalla,
+   compresión ZSO, quitar diagnósticos, actualizar docs/PS2_PORT.md.
+5. Fase 5: mejoras de los bots (que usen más objetos) y cargador de mods para personajes y
+   mapas nuevos sin reemplazar los originales.
+
+7. NOTAS
+--------
+- El MP2 NO es la solución para el rendimiento: la música de las carreras y los efectos de CTR
+  no son audio grabado sino "partituras" tocadas por las 24 voces de la SPU (la última vuelta
+  acelera la música en directo). Solo las voces/presentador y algo de música son XA (audio
+  grabado), y esa parte ya es barata.
