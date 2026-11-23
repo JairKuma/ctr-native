@@ -28,6 +28,10 @@
 // (boton ANALOG): durante el cambio libpad no deja leer y el juego mostraria
 // "controller unplugged" un segundo.
 #define PS2_INPUT_GRACE_FRAMES        90
+// Preparacion de los motores: intentos por conexion/cambio de modo y frames
+// maximos esperando la respuesta (asi nunca se queda repitiendo la orden).
+#define PS2_INPUT_ALIGN_MAX_TRIES     3
+#define PS2_INPUT_ALIGN_MAX_WAIT      120
 
 struct Ps2InputPad
 {
@@ -46,7 +50,9 @@ struct Ps2InputPad
 	const unsigned char *actTable;
 	int actLen;
 	int alignStep;     // 0 = pedir motores, 1 = esperando, 2 = listos
-	int alignTries;
+	int alignTries;    // intentos fallidos desde el ultimo cambio de modo
+	int alignWait;     // frames esperando la respuesta de padSetActAlign
+	int lastModeId;    // modo del mando (PAD_MODECURID) visto la ultima vez
 	u8 actSent[2];
 	int actSentValid;
 };
@@ -186,27 +192,28 @@ internal void Ps2Input_TrySetAnalog(int port, struct Ps2InputPad *pad)
 }
 
 // Prepara los motores del DualShock (una vez por conexion o cambio de modo).
+// Solo en modo analogico: en digital no se mandan ordenes de configuracion al
+// mando (antes, al apagar ANALOG, la orden se repetia sin fin, el mando se
+// quedaba ocupado casi siempre y los botones iban a tirones o no iban).
 internal void Ps2Input_PrepareMotors(int port, struct Ps2InputPad *pad)
 {
 	if (pad->alignStep == 0)
 	{
-		if (pad->alignTries > 20)
+		if (pad->alignTries >= PS2_INPUT_ALIGN_MAX_TRIES)
 		{
 			return; // el mando no tiene motores o no acepta la orden
 		}
-		if (padInfoAct(port, 0, -1, 0) == 0)
+		if (padInfoAct(port, 0, -1, 0) <= 0)
 		{
 			pad->alignTries++;
 			return;
 		}
 		static const char align[6] = {0, 1, (char)0xff, (char)0xff, (char)0xff, (char)0xff};
+		pad->alignTries++; // cada orden enviada cuenta: como mucho 3 por cambio de modo
 		if (padSetActAlign(port, 0, align) == 1)
 		{
 			pad->alignStep = 1;
-		}
-		else
-		{
-			pad->alignTries++;
+			pad->alignWait = 0;
 		}
 	}
 	else if (pad->alignStep == 1)
@@ -216,11 +223,12 @@ internal void Ps2Input_PrepareMotors(int port, struct Ps2InputPad *pad)
 		{
 			pad->alignStep = 2;
 			pad->actSentValid = 0;
+			printf("[CTR PS2] Pad %d: motores listos\n", port + 1);
 		}
-		else if (req == PAD_RSTAT_FAILED)
+		else if ((req == PAD_RSTAT_FAILED) || (++pad->alignWait > PS2_INPUT_ALIGN_MAX_WAIT))
 		{
 			pad->alignStep = 0;
-			pad->alignTries++;
+			printf("[CTR PS2] Pad %d: motores no preparados (intento %d)\n", port + 1, pad->alignTries);
 		}
 	}
 }
@@ -287,20 +295,18 @@ internal void Ps2Input_ReadPad(int port)
 	}
 
 	const int state = padGetState(port, 0);
-	if (state != PAD_STATE_STABLE)
-	{
-		// Al cambiar de modo o desconectarse, los motores hay que volver a
-		// prepararlos.
-		pad->alignStep = 0;
-		pad->actSentValid = 0;
-	}
 	if (state == PAD_STATE_DISCONN)
 	{
-		// Mando quitado de verdad: la proxima vez se vuelve a poner en analogico.
+		// Mando quitado de verdad: la proxima vez se vuelve a poner en analogico
+		// y se vuelven a preparar los motores.
 		pad->modeStep = 0;
 		pad->modeTries = 0;
 		pad->verifyLeft = 3;
+		pad->alignStep = 0;
 		pad->alignTries = 0;
+		pad->alignWait = 0;
+		pad->actSentValid = 0;
+		pad->lastModeId = 0;
 		Ps2Input_KeepDuringTransition(pad);
 		return;
 	}
@@ -316,7 +322,28 @@ internal void Ps2Input_ReadPad(int port)
 	}
 	else if ((state == PAD_STATE_STABLE) && (pad->modeStep == 2))
 	{
-		Ps2Input_PrepareMotors(port, pad);
+		// Boton ANALOG: si el modo cambia, los motores se preparan de nuevo
+		// (solo una vez, y solo en analogico).
+		const int cur = padInfoMode(port, 0, PAD_MODECURID, 0);
+		if ((cur != 0) && (cur != pad->lastModeId))
+		{
+			printf("[CTR PS2] Pad %d: modo %d -> %d\n", port + 1, pad->lastModeId, cur);
+			pad->lastModeId = cur;
+			if (pad->alignStep != 1) // si hay una orden en curso, se deja terminar
+			{
+				pad->alignStep = 0;
+			}
+			pad->alignTries = 0;
+			pad->actSentValid = 0;
+		}
+		if (cur == PAD_TYPE_DUALSHOCK)
+		{
+			Ps2Input_PrepareMotors(port, pad);
+		}
+		else if (pad->alignStep == 2)
+		{
+			pad->alignStep = 0; // en digital no se manda vibracion
+		}
 	}
 
 	memset(&status, 0, sizeof(status));
