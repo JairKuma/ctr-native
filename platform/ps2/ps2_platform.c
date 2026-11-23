@@ -142,14 +142,20 @@ internal int Ps2_CatchUpDueVBlanks(void)
 	return emitted;
 }
 
+void NativeCD_Ps2Pump(void); // platform/native_cd.c
+
 internal void Ps2_WaitAndEmitVBlank(void)
 {
+	// Carga del disco en segundo plano: recoger el bloque y pedir el siguiente.
+	NativeCD_Ps2Pump();
 	if (s_hwVBlankCount == s_consumedVBlankCount)
 	{
 		const u32 idleStart = Ps2Prof_Now();
 		while (s_hwVBlankCount == s_consumedVBlankCount)
 		{
-			// Espera activa: el juego original tambien bloquea aqui.
+			// Espera activa: el juego original tambien bloquea aqui. Se
+			// aprovecha para avanzar la carga del disco (si no hay, no hace nada).
+			NativeCD_Ps2Pump();
 		}
 		g_ps2ProfIdleCycles += (u32)(Ps2Prof_Now() - idleStart);
 	}
