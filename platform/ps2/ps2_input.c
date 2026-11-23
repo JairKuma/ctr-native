@@ -8,7 +8,7 @@
 //   - 4 bytes de sticks en el mismo orden (derecho X/Y, izquierdo X/Y).
 // Asi que se copian tal cual al paquete que lee el juego. No se activa el modo
 // de botones sensibles a la presion, de modo que DualShock 1 y DualShock 2 se
-// comportan igual. Al conectar el mando se enciende el modo analogico (sin
+// comportan igual. Vibracion de los dos motores del DualShock. Al conectar el mando se enciende el modo analogico (sin
 // bloquearlo: el boton ANALOG lo puede apagar).
 
 #include <macros.h>
@@ -40,6 +40,15 @@ struct Ps2InputPad
 	int modeStep;      // 0 = pedir modo analogico, 1 = esperando, 2 = hecho
 	int modeTries;     // intentos esperando a que el mando diga sus modos
 	int verifyLeft;    // comprobaciones que quedan de que quedo en analogico
+	// Vibracion (DualShock): el juego da con PadSetAct un buffer de 2 bytes
+	// (motor pequeno on/off, motor grande 0-255) que rellena cada fotograma;
+	// la libpad de PS1 lo enviaba sola en cada lectura del mando.
+	const unsigned char *actTable;
+	int actLen;
+	int alignStep;     // 0 = pedir motores, 1 = esperando, 2 = listos
+	int alignTries;
+	u8 actSent[2];
+	int actSentValid;
 };
 
 // libpad necesita 256 bytes alineados a 64 por puerto.
@@ -176,6 +185,96 @@ internal void Ps2Input_TrySetAnalog(int port, struct Ps2InputPad *pad)
 	}
 }
 
+// Prepara los motores del DualShock (una vez por conexion o cambio de modo).
+internal void Ps2Input_PrepareMotors(int port, struct Ps2InputPad *pad)
+{
+	if (pad->alignStep == 0)
+	{
+		if (pad->alignTries > 20)
+		{
+			return; // el mando no tiene motores o no acepta la orden
+		}
+		if (padInfoAct(port, 0, -1, 0) == 0)
+		{
+			pad->alignTries++;
+			return;
+		}
+		static const char align[6] = {0, 1, (char)0xff, (char)0xff, (char)0xff, (char)0xff};
+		if (padSetActAlign(port, 0, align) == 1)
+		{
+			pad->alignStep = 1;
+		}
+		else
+		{
+			pad->alignTries++;
+		}
+	}
+	else if (pad->alignStep == 1)
+	{
+		const int req = padGetReqState(port, 0);
+		if (req == PAD_RSTAT_COMPLETE)
+		{
+			pad->alignStep = 2;
+			pad->actSentValid = 0;
+		}
+		else if (req == PAD_RSTAT_FAILED)
+		{
+			pad->alignStep = 0;
+			pad->alignTries++;
+		}
+	}
+}
+
+// Manda al mando lo que el juego ha puesto en su buffer de vibracion.
+internal void Ps2Input_SendMotors(int port, struct Ps2InputPad *pad)
+{
+	if (!pad->connected || (pad->alignStep != 2))
+	{
+		return;
+	}
+	u8 small = 0;
+	u8 big = 0;
+	if ((pad->actTable != NULL) && (pad->actLen > 0))
+	{
+		small = (pad->actTable[0] != 0) ? 1 : 0;
+		big = (pad->actLen > 1) ? pad->actTable[1] : 0;
+	}
+	if (pad->actSentValid && (pad->actSent[0] == small) && (pad->actSent[1] == big))
+	{
+		return;
+	}
+	char act[6] = {(char)small, (char)big, 0, 0, 0, 0};
+	if (padSetActDirect(port, 0, act) == 1)
+	{
+		pad->actSent[0] = small;
+		pad->actSent[1] = big;
+		pad->actSentValid = 1;
+	}
+}
+
+// Para native_libpad.c: lo que la libpad de PS1 respondia sobre los motores.
+int Ps2Input_PadInfoAct(int id, int acno, int term)
+{
+	const int slot = (id >> 4) & 1;
+	if (((id & 3) != 0) || !s_ps2PadLibReady || !s_ps2Pads[slot].connected)
+	{
+		return 0;
+	}
+	if (acno == -1)
+	{
+		return padInfoAct(slot, 0, -1, 0);
+	}
+	return padInfoAct(slot, 0, acno, term);
+}
+
+int Ps2Input_PadSetMainMode(int id)
+{
+	// El juego pide el modo analogico antes de usar los motores (en PS1
+	// devuelve 1 si se pudo). Aqui el modo ya lo gestiona el port.
+	const int slot = (id >> 4) & 1;
+	return ((id & 3) == 0) && s_ps2Pads[slot].connected;
+}
+
 internal void Ps2Input_ReadPad(int port)
 {
 	struct Ps2InputPad *pad = &s_ps2Pads[port];
@@ -188,12 +287,20 @@ internal void Ps2Input_ReadPad(int port)
 	}
 
 	const int state = padGetState(port, 0);
+	if (state != PAD_STATE_STABLE)
+	{
+		// Al cambiar de modo o desconectarse, los motores hay que volver a
+		// prepararlos.
+		pad->alignStep = 0;
+		pad->actSentValid = 0;
+	}
 	if (state == PAD_STATE_DISCONN)
 	{
 		// Mando quitado de verdad: la proxima vez se vuelve a poner en analogico.
 		pad->modeStep = 0;
 		pad->modeTries = 0;
 		pad->verifyLeft = 3;
+		pad->alignTries = 0;
 		Ps2Input_KeepDuringTransition(pad);
 		return;
 	}
@@ -206,6 +313,10 @@ internal void Ps2Input_ReadPad(int port)
 	if ((state == PAD_STATE_STABLE) && ((pad->modeStep != 2) || (pad->verifyLeft > 0)))
 	{
 		Ps2Input_TrySetAnalog(port, pad);
+	}
+	else if ((state == PAD_STATE_STABLE) && (pad->modeStep == 2))
+	{
+		Ps2Input_PrepareMotors(port, pad);
 	}
 
 	memset(&status, 0, sizeof(status));
@@ -284,6 +395,7 @@ void Platform_InputUpdate(void)
 	for (int port = 0; port < PS2_INPUT_PHYSICAL_SLOT_COUNT; port++)
 	{
 		Ps2Input_ReadPad(port);
+		Ps2Input_SendMotors(port, &s_ps2Pads[port]);
 	}
 
 	Ps2Input_WriteBus();
@@ -336,10 +448,15 @@ int Platform_InputPadGetState(int port)
 
 void Platform_InputPadVibrate(int port, unsigned char *table, int len)
 {
-	// Vibracion: pendiente (PadInfoAct devuelve 0 motores, asi que el juego no la pide).
-	(void)port;
-	(void)table;
-	(void)len;
+	// PadSetAct: se guarda el buffer; se lee y se envia en cada actualizacion.
+	const int slot = (port >> 4) & 1;
+	if ((port & 3) != 0)
+	{
+		return;
+	}
+	s_ps2Pads[slot].actTable = table;
+	s_ps2Pads[slot].actLen = len;
+	s_ps2Pads[slot].actSentValid = 0;
 }
 
 int Platform_InputCapturePadSnapshots(struct PlatformInputPadSnapshot *dst, int count)
