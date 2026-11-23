@@ -94,8 +94,20 @@ int LOAD_HowlSectorChainStart(CdlFILE *cdlFileHWL, void *ptrDestination, int fir
 #define LOAD_HOWL_CHAIN_STATE_INITIAL (sdata->howlChainState)
 #endif
 
+#if defined(CTR_PS2)
+void NativeCD_Ps2Pump(void); // platform/native_cd.c
+#endif
+
 int LOAD_HowlSectorChainEnd(void)
 {
+#if defined(CTR_PS2)
+	// PS2: la lectura va en segundo plano y avanza en VSync, pero Music_SetIntro
+	// espera en un bucle sin VSync: avanzarla tambien aqui.
+	if (sdata->howlChainState == 1)
+	{
+		NativeCD_Ps2Pump();
+	}
+#endif
 	int howlChainState = LOAD_HOWL_CHAIN_STATE_INITIAL;
 
 	if (howlChainState == -1)
