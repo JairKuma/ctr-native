@@ -187,6 +187,21 @@ internal int NativeMemcard_MakeDir(const char *path)
 		return 1;
 	}
 
+#if defined(CTR_PS2)
+	// PS2: la memory card no responde EEXIST cuando la carpeta ya existe (da
+	// otro codigo). Antes se tomaba como fallo, no se guardaba y el juego decia
+	// "MEMORY CARD IS FULL" (la primera vez funcionaba: las carpetas no existian).
+	// Si se puede abrir, es que existe.
+	{
+		DIR *existing = opendir(path);
+		if (existing != NULL)
+		{
+			closedir(existing);
+			return 1;
+		}
+		printf("[CTR PS2] memory card: no se pudo crear la carpeta %s (errno %d)\n", path, errno);
+	}
+#endif
 	return errno == EEXIST;
 #endif
 }
