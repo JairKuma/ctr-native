@@ -207,6 +207,18 @@ internal int NativeMemcard_MakeDir(const char *path)
 }
 
 #if defined(CTR_PS2)
+// PS2 (memory card): el navegador de la PS2 solo sabe borrar/copiar carpetas
+// sin subcarpetas. Por eso las partidas van directamente en la carpeta raiz,
+// con la ranura delante del nombre: "mc0:/CTRNATIVE/0-BASCUS-94426-SLOTS".
+// (Antes: mc0:/CTRNATIVE/slot0/BASCUS-94426-SLOTS; al borrar, el navegador
+// quitaba el icono, fallaba en la subcarpeta y quedaba "datos danados".)
+internal int Ps2Memcard_IsFlatRoot(const char *root)
+{
+	return (root != NULL) && (strncmp(root, "mc", 2) == 0);
+}
+#endif
+
+#if defined(CTR_PS2)
 // --- Icono de la memory card de PS2 -------------------------------------------
 // La PS2 necesita icon.sys (nombre y colores) y un icono 3D en cada carpeta de la
 // memory card; sin ellos el navegador la muestra como "datos danados" y no deja
@@ -269,10 +281,11 @@ internal int Ps2Memcard_WriteIconSys(const char *path)
 	u8 sys[964];
 	memset(sys, 0, sizeof(sys));
 	memcpy(&sys[0x000], "PS2D", 4);
-	// Titulo en dos lineas: la segunda empieza en el byte indicado en 0x006.
-	const int line1 = Ps2Memcard_ToSjis(&sys[0x0c0], 68, "Crash Team Racing");
+	// Titulo en dos lineas: la segunda empieza en el byte indicado en 0x006. El
+	// navegador de la PS2 muestra como mucho 16 letras por linea.
+	const int line1 = Ps2Memcard_ToSjis(&sys[0x0c0], 68, "Crash Team");
 	Ps2Memcard_Put16(&sys[0x006], (u32)line1);
-	Ps2Memcard_ToSjis(&sys[0x0c0 + line1], 68 - line1, "CTR Native PS2");
+	Ps2Memcard_ToSjis(&sys[0x0c0 + line1], 68 - line1, "Racing PS2");
 	Ps2Memcard_Put32(&sys[0x00c], 0x00); // transparencia del fondo
 	// Fondo: degradado azul oscuro (arriba) a naranja (abajo).
 	const u32 bg[4][3] = {{0x00, 0x10, 0x40}, {0x00, 0x10, 0x40}, {0x60, 0x30, 0x00}, {0x60, 0x30, 0x00}};
@@ -433,8 +446,15 @@ internal void Ps2Memcard_EnsureIcon(const char *root)
 	FILE *f = fopen(path, "rb");
 	if (f != NULL)
 	{
+		// Ya esta. Si es el de la primera version (titulo de 17 letras, que el
+		// navegador cortaba), se vuelve a escribir.
+		u8 head[8];
+		const size_t got = fread(head, 1, sizeof(head), f);
 		fclose(f);
-		return; // ya esta
+		if ((got == sizeof(head)) && (head[6] != 34))
+		{
+			return;
+		}
 	}
 	const int sysOk = Ps2Memcard_WriteIconSys(path);
 	snprintf(path, sizeof(path), "%s/%s", root, PS2_MC_ICON_FILE);
@@ -454,6 +474,12 @@ internal int NativeMemcard_EnsureSlotRoot(const char *root, int slot)
 	}
 #if defined(CTR_PS2)
 	Ps2Memcard_EnsureIcon(root);
+	if (Ps2Memcard_IsFlatRoot(root))
+	{
+		(void)slot;
+		(void)slotRoot;
+		return 1; // formato plano: sin subcarpetas
+	}
 #endif
 	if (!NativeMemcard_BuildSlotRoot(slotRoot, sizeof(slotRoot), root, slot))
 	{
@@ -468,6 +494,23 @@ internal int NativeMemcard_BuildPathFromDeviceName(char *dst, int dst_size, cons
 	struct NativeMemcardDeviceName device = NativeMemcard_ParseDeviceName(save_name);
 	const char *root = NativeMemcard_ActiveRoot();
 	char slotRoot[NATIVE_MEMCARD_MAX_PATH];
+
+#if defined(CTR_PS2)
+	if (Ps2Memcard_IsFlatRoot(root))
+	{
+		char flatName[NATIVE_MEMCARD_MAX_NAME + 4];
+		if (ensureSlotRoot != 0)
+		{
+			if (!NativeMemcard_MakeDir(root))
+			{
+				return 0;
+			}
+			Ps2Memcard_EnsureIcon(root);
+		}
+		snprintf(flatName, sizeof(flatName), "%d-%s", device.slot, device.name);
+		return NativeMemcard_JoinPath(dst, dst_size, root, flatName);
+	}
+#endif
 
 	if (ensureSlotRoot != 0)
 	{
@@ -791,6 +834,14 @@ internal void NativeMemcard_BuildFindList(const char *pattern)
 		{
 			if (NativeMemcard_MatchesPattern(entry->d_name, file_pattern) != 0)
 			{
+#if defined(CTR_PS2)
+				// Formato plano: el juego no ve el "N-" de la ranura.
+				if (Ps2Memcard_IsFlatRoot(NativeMemcard_ActiveRoot()) && (entry->d_name[0] >= '0') && (entry->d_name[0] <= '9') && (entry->d_name[1] == '-'))
+				{
+					NativeMemcard_AddFoundName(entry->d_name + 2);
+					continue;
+				}
+#endif
 				NativeMemcard_AddFoundName(entry->d_name);
 			}
 		}
@@ -815,13 +866,59 @@ enum NativeMemcardResult NativeMemcard_SetRoot(const char *root_path)
 
 	memset(&s_memcardFind, 0, sizeof(s_memcardFind));
 #if defined(CTR_PS2)
-	// Si la carpeta ya existe (partidas de antes, sin icono), ponerle el icono al
-	// arrancar: deja de salir como "datos danados" sin tener que guardar.
+	// Si la carpeta ya existe: pasar las partidas del formato viejo (subcarpetas
+	// slot0/slot1) al plano, quitar esas subcarpetas y poner el icono. Asi deja
+	// de salir como "datos danados" y se puede borrar desde el navegador.
+	if (Ps2Memcard_IsFlatRoot(s_memcardRoot))
 	{
 		DIR *existing = opendir(s_memcardRoot);
 		if (existing != NULL)
 		{
 			closedir(existing);
+			for (int slot = 0; slot < NATIVE_MEMCARD_SLOT_COUNT; slot++)
+			{
+				char oldDir[NATIVE_MEMCARD_MAX_PATH];
+				char names[16][NATIVE_MEMCARD_MAX_NAME];
+				int count = 0;
+				if (!NativeMemcard_BuildSlotRoot(oldDir, sizeof(oldDir), s_memcardRoot, slot))
+				{
+					continue;
+				}
+				DIR *old = opendir(oldDir);
+				if (old == NULL)
+				{
+					continue;
+				}
+				struct dirent *entry;
+				while (((entry = readdir(old)) != NULL) && (count < 16))
+				{
+					if ((strcmp(entry->d_name, ".") != 0) && (strcmp(entry->d_name, "..") != 0))
+					{
+						NativeMemcard_CopyString(names[count], sizeof(names[count]), entry->d_name);
+						count++;
+					}
+				}
+				closedir(old);
+				int moved = 0;
+				for (int i = 0; i < count; i++)
+				{
+					char src[NATIVE_MEMCARD_MAX_PATH];
+					char dst[NATIVE_MEMCARD_MAX_PATH];
+					snprintf(src, sizeof(src), "%s/%s", oldDir, names[i]);
+					snprintf(dst, sizeof(dst), "%s/%d-%s", s_memcardRoot, slot, names[i]);
+					if (NativeMemcard_CopyFile(src, dst) == NATIVE_MEMCARD_OK)
+					{
+						remove(src);
+						moved++;
+					}
+					else
+					{
+						printf("[CTR PS2] memory card: no se pudo mover %s\n", src);
+					}
+				}
+				const int removed = (moved == count) && (rmdir(oldDir) == 0);
+				printf("[CTR PS2] memory card: formato viejo %s -> %d partidas movidas, carpeta %s\n", oldDir, moved, removed ? "quitada" : "NO quitada");
+			}
 			Ps2Memcard_EnsureIcon(s_memcardRoot);
 		}
 	}
