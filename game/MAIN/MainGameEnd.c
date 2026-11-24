@@ -1,5 +1,10 @@
 #include <common.h>
 
+#if defined(CTR_PS2)
+int Ps2DemoRoulette_Start(void); // platform/ps2/ps2_demo_roulette.c
+void Ps2DemoRoulette_Stop(void);
+#endif
+
 #ifndef MAIN_HIGH_SCORES
 #define MAIN_HIGH_SCORES (sdata->ptrActiveHighScoreEntry)
 #endif
@@ -267,6 +272,9 @@ void MainGameEnd_Initialize(void)
 
 		if ((GAME_TRACKER->gameMode1 & ROLLING_ITEM) != 0)
 		{
+#if defined(CTR_PS2)
+			Ps2DemoRoulette_Stop();
+#endif
 			OtherFX_Stop2(0x5d);
 			GAME_TRACKER->gameMode1 &= ~ROLLING_ITEM;
 		}
