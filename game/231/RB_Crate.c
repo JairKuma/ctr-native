@@ -1,5 +1,10 @@
 #include "RB_Pickup.h"
 
+#if defined(CTR_PS2)
+int Ps2DemoRoulette_Start(void); // platform/ps2/ps2_demo_roulette.c
+void Ps2DemoRoulette_Stop(void);
+#endif
+
 char rb_crateExplosionName[28] = "explosion1";
 
 void RB_CrateAny_ThTick_Explode(struct Thread *t)
@@ -199,6 +204,10 @@ int RB_CrateWeapon_ThCollide(struct Thread *crateThread, struct Thread *collidin
 
 				if ((GAME_TRACKER->gameMode1 & ROLLING_ITEM) == 0)
 				{
+#if defined(CTR_PS2)
+					// PS2: melodia de la ruleta de la demo si hay DEMO.HWL; si no, la de siempre.
+					if (!Ps2DemoRoulette_Start())
+#endif
 					OtherFX_Play(0x5d, 0);
 					GAME_TRACKER->gameMode1 |= ROLLING_ITEM;
 				}
