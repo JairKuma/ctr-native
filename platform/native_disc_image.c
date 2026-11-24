@@ -429,6 +429,9 @@ static u32 s_ps2JobStatBlocks = 0;
 static u32 s_ps2JobStatForced = 0;
 static u32 s_ps2JobLogCount = 0; // las primeras cargas se apuntan en el log
 static u32 s_ps2PrefetchStatRequested = 0;
+static u32 s_ps2JobAsyncFailures = 0;
+static u32 s_ps2JobBusyCount = 0;     // intentos seguidos con el lector ocupado
+static u32 s_ps2JobBusyFallbacks = 0; // veces que se leyo de la forma normal por eso // fallos del lector en 2o plano (se leyo de la forma normal)
 static u32 s_ps2PrefetchStatUsed = 0;
 
 // 1 si el sector esta en un hueco de datos del juego (no en el de la XA).
@@ -615,6 +618,7 @@ int NativeDiscImage_Ps2JobStep(int mayBlock)
 		const u32 lba = s_ps2JobFile.lba + s_ps2JobSector;
 		if (!NativeDiscImage_Ps2GameSlotHas(lba))
 		{
+			int readNow = 0;
 			if (s_ps2JobPending)
 			{
 				const int r = NativeDiscImage_Ps2JobCollect(mayBlock);
@@ -622,25 +626,40 @@ int NativeDiscImage_Ps2JobStep(int mayBlock)
 				{
 					return 0; // aun leyendo: el juego sigue
 				}
-				if ((r < 0) && (s_ps2JobErrors > 3))
+				if (r > 0)
 				{
-					NativeDiscImage_Ps2JobStop(1);
-					printf("[CTR PS2] carga en 2o plano: error de lectura en lba %u\n", (unsigned)lba);
-					return -1;
+					continue;
 				}
-				continue;
+				// Error del lector en 2o plano (en la PS2 real con OPL/MX4SIO puede
+				// pasar): NO se avisa al juego (con "error de disco" se quedaba
+				// esperando para siempre); este sector se lee ahora de la forma
+				// normal, que reintenta sola.
+				s_ps2JobAsyncFailures++;
+				printf("[CTR PS2] carga en 2o plano: fallo del lector en lba %u, se lee de la forma normal\n", (unsigned)lba);
+				readNow = 1;
 			}
-			if (!mayBlock)
+			if (!mayBlock && !readNow)
 			{
 				const int r = NativeDiscImage_Ps2JobRequest(lba);
-				if (r >= 0)
+				if (r > 0)
 				{
-					return 0; // pedido (o lector ocupado): seguir en el siguiente VSync
+					s_ps2JobBusyCount = 0;
+					return 0; // pedido: seguir en el siguiente VSync
 				}
-				// r < 0: se lee de la forma normal (abajo).
+				if ((r == 0) && (++s_ps2JobBusyCount < 30))
+				{
+					return 0; // lector ocupado: probar en el siguiente VSync
+				}
+				// Lector ocupado ~medio segundo seguido, o no se puede pedir: se lee
+				// de la forma normal (abajo) para que la carga nunca se quede parada.
+				if (r == 0)
+				{
+					s_ps2JobBusyFallbacks++;
+				}
+				s_ps2JobBusyCount = 0;
 			}
 		}
-		if (!mayBlock && (copied >= 256))
+		else if (!mayBlock && (copied >= 256))
 		{
 			return 0; // no gastar demasiado de un fotograma copiando
 		}
@@ -662,9 +681,9 @@ int NativeDiscImage_Ps2JobStep(int mayBlock)
 	}
 	if (s_ps2JobStatFiles >= 20)
 	{
-		printf("[CTR PS2] cargas en 2o plano: archivos %u | %u KB | bloques %u | esperas forzadas %u | lectura anticipada %u (recogidas al leer %u)\n",
+		printf("[CTR PS2] cargas en 2o plano: archivos %u | %u KB | bloques %u | esperas forzadas %u | lectura anticipada %u (recogidas al leer %u) | fallos lector %u | lector ocupado %u\n",
 		       (unsigned)s_ps2JobStatFiles, (unsigned)(s_ps2JobStatSectors * 2u), (unsigned)s_ps2JobStatBlocks, (unsigned)s_ps2JobStatForced,
-		       (unsigned)s_ps2PrefetchStatRequested, (unsigned)s_ps2PrefetchStatUsed);
+		       (unsigned)s_ps2PrefetchStatRequested, (unsigned)s_ps2PrefetchStatUsed, (unsigned)s_ps2JobAsyncFailures, (unsigned)s_ps2JobBusyFallbacks);
 		s_ps2JobStatFiles = 0;
 		s_ps2JobStatSectors = 0;
 		s_ps2JobStatBlocks = 0;
