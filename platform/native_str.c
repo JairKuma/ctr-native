@@ -183,19 +183,44 @@ internal u32 NativeSTR_Word16(const struct NativeSTRBitReader *br, s32 wordIndex
 	return (byteOffset + 1 < br->size) ? (u32)NativeSTR_ReadLE16(&br->data[byteOffset]) : 0u;
 }
 
+// Los 32 bits que empiezan en la posicion actual.
+static inline u32 NativeSTR_Peek32(const struct NativeSTRBitReader *br)
+{
+	const s32 w = br->bitOffset >> 4;
+	const s32 sh = br->bitOffset & 15;
+	const s32 byteOffset = w * 2;
+	u32 w0;
+	u32 w1;
+	u32 w2;
+	if (byteOffset + 5 < br->size)
+	{
+		// Lejos del final (casi siempre): sin comprobar cada palabra.
+		const u8 *p = &br->data[byteOffset];
+		w0 = (u32)p[0] | ((u32)p[1] << 8);
+		w1 = (u32)p[2] | ((u32)p[3] << 8);
+		w2 = (u32)p[4] | ((u32)p[5] << 8);
+	}
+	else
+	{
+		w0 = NativeSTR_Word16(br, w);
+		w1 = NativeSTR_Word16(br, w + 1);
+		w2 = NativeSTR_Word16(br, w + 2);
+	}
+	u32 v = (w0 << 16) | w1;
+	if (sh != 0)
+	{
+		v = (v << sh) | (w2 >> (16 - sh));
+	}
+	return v;
+}
+
 internal u32 NativeSTR_PeekBits(struct NativeSTRBitReader *br, s32 count)
 {
 	if (count <= 0)
 	{
 		return 0;
 	}
-	const s32 w = br->bitOffset >> 4;
-	const s32 sh = br->bitOffset & 15;
-	u32 v = (NativeSTR_Word16(br, w) << 16) | NativeSTR_Word16(br, w + 1);
-	if (sh != 0)
-	{
-		v = (v << sh) | (NativeSTR_Word16(br, w + 2) >> (16 - sh));
-	}
+	const u32 v = NativeSTR_Peek32(br);
 	return (count >= 32) ? v : (v >> (32 - count));
 }
 
@@ -238,12 +263,80 @@ internal u32 NativeSTR_PeekBits(struct NativeSTRBitReader *br, s32 count)
 }
 #endif
 
+#if defined(CTR_PS2)
+// PS2: tabla con los codigos cortos (hasta 12 bits contando indice y signo),
+// indexada por los 12 bits siguientes: longitud y valor ya con el signo. Los
+// demas casos siguen por el camino de siempre. Mismo resultado.
+#define NATIVE_STR_AC_TABLE_BITS 12
+global_variable u32 s_acTable[1 << NATIVE_STR_AC_TABLE_BITS]; // bit 31 valido | longitud << 16 | codigo
+global_variable int s_acTableReady = 0;
+
+internal void NativeSTR_BuildAcTable(void)
+{
+	for (u32 idx = 0; idx < (1u << NATIVE_STR_AC_TABLE_BITS); idx++)
+	{
+		u32 entry = 0;
+		for (u32 i = 0; i < sizeof(s_acGroups) / sizeof(s_acGroups[0]); i++)
+		{
+			const struct NativeSTRAcGroup *group = &s_acGroups[i];
+			if (group->prefixBits > NATIVE_STR_AC_TABLE_BITS)
+			{
+				// Podria coincidir segun bits que la tabla no ve: camino normal.
+				if ((idx >> 0) == ((u32)group->prefix >> (group->prefixBits - NATIVE_STR_AC_TABLE_BITS)))
+				{
+					break;
+				}
+				continue;
+			}
+			if ((idx >> (NATIVE_STR_AC_TABLE_BITS - group->prefixBits)) != group->prefix)
+			{
+				continue;
+			}
+			const u32 hasSign = (group->values[0] != NATIVE_STR_END_OF_BLOCK) ? 1u : 0u;
+			const u32 length = group->prefixBits + group->indexBits + hasSign;
+			if (length > NATIVE_STR_AC_TABLE_BITS)
+			{
+				break;
+			}
+			u32 rest = idx << group->prefixBits; // bits que siguen al prefijo, arriba
+			const u32 index = (group->indexBits != 0) ? ((rest & ((1u << NATIVE_STR_AC_TABLE_BITS) - 1u)) >> (NATIVE_STR_AC_TABLE_BITS - group->indexBits)) : 0u;
+			rest <<= group->indexBits;
+			const u32 sign = hasSign ? ((rest >> (NATIVE_STR_AC_TABLE_BITS - 1)) & 1u) : 0u;
+			if (index >= group->valueCount)
+			{
+				break; // error: lo decide el camino normal
+			}
+			const u16 code = group->values[index];
+			const u16 finalCode = (sign != 0) ? NativeSTR_NegateMdecCode(code) : code;
+			entry = 0x80000000u | (length << 16) | finalCode;
+			break;
+		}
+		s_acTable[idx] = entry;
+	}
+	s_acTableReady = 1;
+}
+#endif
+
 internal s32 NativeSTR_ReadAcCode(struct NativeSTRBitReader *br, u16 *outCode)
 {
 #if defined(CTR_PS2)
 	// PS2: se miran los 16 bits siguientes una sola vez (antes, una lectura por
 	// cada grupo probado). Mismo orden de comprobaciones y mismo resultado.
 	const u32 next16 = NativeSTR_PeekBits(br, 16);
+	if (((next16 >> 10) != 0x1) && ((next16 >> 4) != 0))
+	{
+		if (!s_acTableReady)
+		{
+			NativeSTR_BuildAcTable();
+		}
+		const u32 entry = s_acTable[next16 >> (16 - NATIVE_STR_AC_TABLE_BITS)];
+		if (entry & 0x80000000u)
+		{
+			br->bitOffset += (s32)((entry >> 16) & 0xff);
+			*outCode = (u16)(entry & 0xffffu);
+			return 1;
+		}
+	}
 	if ((next16 >> 10) == 0x1)
 	{
 		br->bitOffset += 6;
@@ -394,6 +487,32 @@ internal void NativeSTR_IDCT(const s32 *coefficients, s32 *out)
 		return;
 	}
 
+	// Bloque liso (solo el primer coeficiente): los 64 valores son iguales.
+	// Mismas operaciones que el caso general, hechas una vez.
+	if ((rowCount == 1) && (nonZeroRows[0] == 0))
+	{
+		s32 onlyDc = 1;
+		for (s32 u = 1; u < 8; u++)
+		{
+			if (coefficients[u] != 0)
+			{
+				onlyDc = 0;
+				break;
+			}
+		}
+		if (onlyDc)
+		{
+			float sum = 0.0f + s_idctBasisF[0][0] * rowPass[0];
+			sum *= 0.25f;
+			const s32 value = (sum >= 0.0f) ? (s32)(sum + 0.5f) : -(s32)(0.5f - sum);
+			for (s32 i = 0; i < 64; i++)
+			{
+				out[i] = value;
+			}
+			return;
+		}
+	}
+
 	for (s32 y = 0; y < 8; y++)
 	{
 		for (s32 x = 0; x < 8; x++)
@@ -538,6 +657,47 @@ internal s32 NativeSTR_DecodeMacroblock(struct NativeSTRBitReader *br, s32 quant
 			return 0;
 		}
 	}
+
+#if defined(CTR_PS2)
+	// PS2: los 4 pixeles de cada cuadro de 2x2 comparten el color (Cr/Cb): sus
+	// terminos se calculan una vez. Mismas formulas, mismo resultado.
+	for (s32 cy = 0; cy < 8; cy++)
+	{
+		for (s32 cx = 0; cx < 8; cx++)
+		{
+			const s32 cr = blocks[0][cy * 8 + cx];
+			const s32 cb = blocks[1][cy * 8 + cx];
+			const s32 rTerm = ((91881 * cr + 32768) >> 16) + 128;
+			const s32 gTerm = 128 - ((22554 * cb + 46802 * cr + 32768) >> 16);
+			const s32 bTerm = ((116130 * cb + 32768) >> 16) + 128;
+			for (s32 sy = 0; sy < 2; sy++)
+			{
+				const s32 y = cy * 2 + sy;
+				const s32 dstY = baseY + y;
+				if (dstY >= s_str.height)
+				{
+					continue;
+				}
+				const s32 *lumaRow = &blocks[(y < 8) ? ((cx < 4) ? 2 : 3) : ((cx < 4) ? 4 : 5)][(y & 7) * 8];
+				for (s32 sx = 0; sx < 2; sx++)
+				{
+					const s32 x = cx * 2 + sx;
+					const s32 dstX = baseX + x;
+					if (dstX >= s_str.width)
+					{
+						continue;
+					}
+					const s32 luma = lumaRow[x & 7];
+					const s32 r = NativeSTR_Clamp8(luma + rTerm);
+					const s32 g = NativeSTR_Clamp8(luma + gTerm);
+					const s32 b = NativeSTR_Clamp8(luma + bTerm);
+					s_str.rgb555[dstY * s_str.width + dstX] = (u16)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10));
+				}
+			}
+		}
+	}
+	return 1;
+#endif
 
 	for (s32 y = 0; y < 16; y++)
 	{

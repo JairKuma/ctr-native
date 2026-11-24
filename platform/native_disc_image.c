@@ -430,7 +430,8 @@ static u32 s_ps2JobStatForced = 0;
 static u32 s_ps2JobLogCount = 0; // las primeras cargas se apuntan en el log
 static u32 s_ps2PrefetchStatRequested = 0;
 static u32 s_ps2JobAsyncFailures = 0;
-static u32 s_ps2JobBusyCount = 0;     // intentos seguidos con el lector ocupado
+static u32 s_ps2JobBusySince = 0;     // ciclos (Count) desde que el lector esta ocupado
+static int s_ps2JobBusyWaiting = 0;   // 1 = esperando turno del lector
 static u32 s_ps2JobBusyFallbacks = 0; // veces que se leyo de la forma normal por eso // fallos del lector en 2o plano (se leyo de la forma normal)
 static u32 s_ps2PrefetchStatUsed = 0;
 
@@ -701,20 +702,29 @@ int NativeDiscImage_Ps2JobStep(int mayBlock)
 				const int r = NativeDiscImage_Ps2JobRequest(lba);
 				if (r > 0)
 				{
-					s_ps2JobBusyCount = 0;
+					s_ps2JobBusyWaiting = 0;
 					return 0; // pedido: seguir en el siguiente VSync
 				}
-				if ((r == 0) && (++s_ps2JobBusyCount < 30))
-				{
-					return 0; // lector ocupado: probar en el siguiente VSync
-				}
-				// Lector ocupado ~medio segundo seguido, o no se puede pedir: se lee
-				// de la forma normal (abajo) para que la carga nunca se quede parada.
 				if (r == 0)
 				{
+					// Lector ocupado (p. ej. con la XA): se cuenta TIEMPO, no intentos
+					// (se intenta miles de veces mientras se espera al VBlank).
+					u32 now;
+					__asm__ volatile("mfc0 %0, $9" : "=r"(now));
+					if (!s_ps2JobBusyWaiting)
+					{
+						s_ps2JobBusyWaiting = 1;
+						s_ps2JobBusySince = now;
+					}
+					if ((u32)(now - s_ps2JobBusySince) < 147456000u) // ~0,5 s a 294,9 MHz
+					{
+						return 0; // probar luego
+					}
 					s_ps2JobBusyFallbacks++;
 				}
-				s_ps2JobBusyCount = 0;
+				// Lector ocupado medio segundo seguido, o no se puede pedir: se lee de
+				// la forma normal (abajo) para que la carga nunca se quede parada.
+				s_ps2JobBusyWaiting = 0;
 			}
 		}
 		else if (!mayBlock && (copied >= 256))
