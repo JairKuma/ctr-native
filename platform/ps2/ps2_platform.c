@@ -170,6 +170,10 @@ extern unsigned long long g_ps2ProfJobCycles;         // native_cd.c
 extern unsigned long long g_ps2ProfJobCallbackCycles; // native_cd.c
 // Cuadrito de diagnostico (lo dibuja ps2_renderer.c al final de cada fotograma).
 u32 g_ps2DebugCornerColor = 0;
+// Cuadrito de fotograma lento en carga (arriba a la derecha) y cuantos
+// fotogramas le quedan en pantalla.
+u32 g_ps2SlowFrameColor = 0;
+int g_ps2SlowFrameTimer = 0;
 int NativeDiscImage_Ps2JobDebugState(void);           // native_disc_image.c
 void NativeDiscImage_Ps2JobDebugPrint(void);
 
@@ -205,6 +209,49 @@ internal void Ps2_ReportSlowLoadFrame(void)
 		printf("[CTR PS2] fotograma lento en carga: %u ms | etapa %d | esperando lector %u | gs %u | audio %u | copia carga %u | callbacks %u | resto (juego) %u\n",
 		       (unsigned)frameMs, (int)sdata->Loading.stage, (unsigned)cdMs, (unsigned)gsMs, (unsigned)audioMs, (unsigned)jobMs, (unsigned)cbMs,
 		       (unsigned)((frameMs > known) ? (frameMs - known) : 0u));
+	}
+	// Cuadrito para la PS2 real (sin log): fotograma de 100 ms o mas durante la
+	// carga. El color dice que se llevo mas tiempo:
+	//   amarillo  esperando al lector (la SD / el disco)
+	//   azul      enviando graficos al GS
+	//   morado    sonido
+	//   naranja   la carga en 2o plano (copiar datos) o sus callbacks
+	//   verde     el propio juego (preparar la pista, modelos...)
+	if ((lastHw != 0) && (frame >= 6) && (sdata->Loading.stage != LOAD_IDLE))
+	{
+		const u32 frameMs = frame * 1000u / 60u;
+		const u32 known = cdMs + gsMs + audioMs + jobMs + cbMs;
+		const u32 gameMs = (frameMs > known) ? (frameMs - known) : 0u;
+		u32 color = 0x00e000; // verde: el juego
+		u32 best = gameMs;
+		if (cdMs > best)
+		{
+			best = cdMs;
+			color = 0xffff00;
+		}
+		if (gsMs > best)
+		{
+			best = gsMs;
+			color = 0x2080ff;
+		}
+		if (audioMs > best)
+		{
+			best = audioMs;
+			color = 0xa000ff;
+		}
+		if ((jobMs + cbMs) > best)
+		{
+			color = 0xff8000;
+		}
+		g_ps2SlowFrameColor = color;
+		g_ps2SlowFrameTimer = 90; // ~3 s a 30 fps
+	}
+	else if (g_ps2SlowFrameTimer > 0)
+	{
+		if (--g_ps2SlowFrameTimer == 0)
+		{
+			g_ps2SlowFrameColor = 0;
+		}
 	}
 	lastHw = hw;
 

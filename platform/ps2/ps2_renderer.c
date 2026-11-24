@@ -1087,9 +1087,25 @@ internal void Ps2Renderer_ClearBorders(void)
 // Cuadrito de diagnostico en la esquina (PS2 real, sin log): lo pone el
 // vigilante de cargas (ps2_platform.c, donde esta la variable). 0 = no se dibuja.
 extern u32 g_ps2DebugCornerColor;
+// Fotograma lento en carga (arriba a la derecha), tambien de ps2_platform.c.
+extern u32 g_ps2SlowFrameColor;
+
+internal void Ps2Renderer_DrawCornerSquare(float x, float y, u32 c)
+{
+	s_gs->PrimAlphaEnable = GS_SETTING_OFF;
+	gsKit_set_scissor(s_gs, GS_SCISSOR_RESET);
+	gsKit_prim_sprite(s_gs, x, y, x + 48.0f, y + 48.0f, 0, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));
+	gsKit_prim_sprite(s_gs, x + 4.0f, y + 4.0f, x + 44.0f, y + 44.0f, 0, GS_SETREG_RGBAQ((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff, 0x80, 0x00));
+	Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
+	Ps2Renderer_ApplyScissor();
+}
 
 internal void Ps2Renderer_DrawDebugCorner(void)
 {
+	if (g_ps2SlowFrameColor != 0)
+	{
+		Ps2Renderer_DrawCornerSquare((float)s_gs->Width - 68.0f, 20.0f, g_ps2SlowFrameColor);
+	}
 	if (g_ps2DebugCornerColor == 0)
 	{
 		return;
