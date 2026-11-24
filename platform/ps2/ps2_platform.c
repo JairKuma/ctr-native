@@ -203,6 +203,28 @@ internal void Ps2_ReportSlowLoadFrame(void)
 		       (unsigned)((frameMs > known) ? (frameMs - known) : 0u));
 	}
 	lastHw = hw;
+
+	// Vigilante de cargas: si el LOADING no cambia de etapa en 10 s, escribir
+	// en que esta esperando (cada 10 s mientras siga igual). Diagnostico.
+	{
+		static int lastStage = -1;
+		static u32 stageSinceHw = 0;
+		static u32 lastReportHw = 0;
+		const int stage = sdata->Loading.stage;
+		if (stage != lastStage)
+		{
+			lastStage = stage;
+			stageSinceHw = hw;
+		}
+		else if ((stage != LOAD_IDLE) && ((hw - stageSinceHw) >= 600u) && ((hw - lastReportHw) >= 600u))
+		{
+			lastReportHw = hw;
+			printf("[CTR PS2] vigilante carga: etapa %d desde hace %u s | cola %d | cola lista %d | reintentar %d | XA estado %d | VLC %d | estado juego %d\n",
+			       stage, (unsigned)((hw - stageSinceHw) / 60u), (int)sdata->queueLength, (int)sdata->queueReady, (int)sdata->queueRetry, (int)sdata->XA_State,
+			       (int)sdata->bool_IsLoaded_VlcTable, (int)sdata->mainGameState);
+			NativeDiscImage_Ps2JobDebugPrint();
+		}
+	}
 }
 
 int VSync(int mode)
