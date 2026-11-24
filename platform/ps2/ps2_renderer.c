@@ -151,6 +151,57 @@ global_variable struct Ps2FbSurface s_fbSurfaces[PS2_MAX_FB_SURFACES];
 global_variable int s_fbSurfaceNext = 0;
 global_variable const struct Ps2FbSurface *s_boundSurface = NULL;
 
+// Rectangulos de VRAM de PS1 de los fotogramas completos (los dos buffers).
+// En pantalla partida el juego pide la copia de la pantalla con el recorte de
+// UN jugador (media pantalla), pero la copia del GS es siempre el fotograma
+// entero: hay que apuntarla con el rectangulo del fotograma completo.
+#define PS2_MAX_FRAME_RECTS 2
+global_variable int s_frameRects[PS2_MAX_FRAME_RECTS][4];
+global_variable int s_frameRectCount = 0;
+global_variable int s_frameRectNext = 0;
+
+internal void Ps2Renderer_RememberFrameRect(int x, int y, int w, int h)
+{
+	for (int i = 0; i < s_frameRectCount; i++)
+	{
+		if ((s_frameRects[i][0] == x) && (s_frameRects[i][1] == y) && (s_frameRects[i][2] == w) && (s_frameRects[i][3] == h))
+		{
+			return;
+		}
+	}
+
+	s_frameRects[s_frameRectNext][0] = x;
+	s_frameRects[s_frameRectNext][1] = y;
+	s_frameRects[s_frameRectNext][2] = w;
+	s_frameRects[s_frameRectNext][3] = h;
+	s_frameRectNext = (s_frameRectNext + 1) % PS2_MAX_FRAME_RECTS;
+	if (s_frameRectCount < PS2_MAX_FRAME_RECTS)
+	{
+		s_frameRectCount++;
+	}
+}
+
+// Si (x, y, w, h) cae dentro de un fotograma completo conocido, lo cambia por el
+// fotograma completo.
+internal void Ps2Renderer_ExpandToFrameRect(int *x, int *y, int *w, int *h)
+{
+	for (int i = 0; i < s_frameRectCount; i++)
+	{
+		const int fx = s_frameRects[i][0];
+		const int fy = s_frameRects[i][1];
+		const int fw = s_frameRects[i][2];
+		const int fh = s_frameRects[i][3];
+		if ((*x >= fx) && (*y >= fy) && ((*x + *w) <= (fx + fw)) && ((*y + *h) <= (fy + fh)))
+		{
+			*x = fx;
+			*y = fy;
+			*w = fw;
+			*h = fh;
+			return;
+		}
+	}
+}
+
 // Copia fija de la pantalla para los efectos que leen lo que se esta dibujando
 // (reloj, ondas, presentaciones, demo...). Comparte memoria del GS con la
 // textura de PresentVRAMRect (nunca se usan en el mismo fotograma).
@@ -1215,6 +1266,7 @@ void Ps2Renderer_StoreDisplayedFrame(int x, int y, int w, int h)
 
 	Ps2Renderer_FlushQueue();
 	s_lastBindValid = 0;
+	Ps2Renderer_RememberFrameRect(x, y, w, h);
 	Ps2Renderer_RegisterSurface(x, y, w, h, s_gs->ScreenBuffer[s_gs->ActiveBuffer & 1], s_frameStp);
 	s_prevFrameStp = s_frameStp;
 	s_frameStp = 0; // el siguiente fotograma empieza sin bit STP
@@ -1236,6 +1288,9 @@ void NativeRenderer_StoreFrameBuffer(int x, int y, int w, int h)
 
 	s_lastBindValid = 0;
 	const u32 drawBuffer = s_gs->ScreenBuffer[s_gs->ActiveBuffer & 1];
+
+	// Pantalla partida: el recorte es de un jugador, la copia es la pantalla entera.
+	Ps2Renderer_ExpandToFrameRect(&x, &y, &w, &h);
 
 	if ((s_fbSnapshotVram == 0) || (s_fbSnapshotVram == GSKIT_ALLOC_ERROR))
 	{
