@@ -206,6 +206,244 @@ internal int NativeMemcard_MakeDir(const char *path)
 #endif
 }
 
+#if defined(CTR_PS2)
+// --- Icono de la memory card de PS2 -------------------------------------------
+// La PS2 necesita icon.sys (nombre y colores) y un icono 3D en cada carpeta de la
+// memory card; sin ellos el navegador la muestra como "datos danados" y no deja
+// borrarla ni copiarla. Se crean al guardar si faltan. El icono es propio: una
+// bandera de cuadros con borde de color, en una placa de dos caras.
+#define PS2_MC_ICON_FILE "ctr.ico"
+
+internal void Ps2Memcard_Put16(u8 *p, u32 v)
+{
+	p[0] = (u8)v;
+	p[1] = (u8)(v >> 8);
+}
+
+internal void Ps2Memcard_Put32(u8 *p, u32 v)
+{
+	p[0] = (u8)v;
+	p[1] = (u8)(v >> 8);
+	p[2] = (u8)(v >> 16);
+	p[3] = (u8)(v >> 24);
+}
+
+internal void Ps2Memcard_PutFloat(u8 *p, float f)
+{
+	u32 v;
+	memcpy(&v, &f, sizeof(v));
+	Ps2Memcard_Put32(p, v);
+}
+
+// Texto ASCII -> Shift-JIS de ancho completo (lo que muestra el navegador).
+internal int Ps2Memcard_ToSjis(u8 *dst, int dstSize, const char *text)
+{
+	int n = 0;
+	for (const char *c = text; (*c != '\0') && (n + 2 <= dstSize); c++)
+	{
+		u32 code = 0x8140; // espacio
+		if ((*c >= '0') && (*c <= '9'))
+		{
+			code = 0x824f + (u32)(*c - '0');
+		}
+		else if ((*c >= 'A') && (*c <= 'Z'))
+		{
+			code = 0x8260 + (u32)(*c - 'A');
+		}
+		else if ((*c >= 'a') && (*c <= 'z'))
+		{
+			code = 0x8281 + (u32)(*c - 'a');
+		}
+		else if (*c == '-')
+		{
+			code = 0x817c;
+		}
+		dst[n++] = (u8)(code >> 8);
+		dst[n++] = (u8)code;
+	}
+	return n;
+}
+
+internal int Ps2Memcard_WriteIconSys(const char *path)
+{
+	u8 sys[964];
+	memset(sys, 0, sizeof(sys));
+	memcpy(&sys[0x000], "PS2D", 4);
+	// Titulo en dos lineas: la segunda empieza en el byte indicado en 0x006.
+	const int line1 = Ps2Memcard_ToSjis(&sys[0x0c0], 68, "Crash Team Racing");
+	Ps2Memcard_Put16(&sys[0x006], (u32)line1);
+	Ps2Memcard_ToSjis(&sys[0x0c0 + line1], 68 - line1, "CTR Native PS2");
+	Ps2Memcard_Put32(&sys[0x00c], 0x00); // transparencia del fondo
+	// Fondo: degradado azul oscuro (arriba) a naranja (abajo).
+	const u32 bg[4][3] = {{0x00, 0x10, 0x40}, {0x00, 0x10, 0x40}, {0x60, 0x30, 0x00}, {0x60, 0x30, 0x00}};
+	for (int i = 0; i < 4; i++)
+	{
+		for (int k = 0; k < 3; k++)
+		{
+			Ps2Memcard_Put32(&sys[0x010 + i * 16 + k * 4], bg[i][k]);
+		}
+		Ps2Memcard_Put32(&sys[0x010 + i * 16 + 12], 0x00);
+	}
+	// Luces (direcciones, colores y ambiente), valores habituales.
+	const float lightDir[3][4] = {{0.5f, 0.5f, 0.5f, 0.0f}, {0.0f, -0.4f, -0.1f, 0.0f}, {-0.5f, -0.5f, 0.5f, 0.0f}};
+	const float lightCol[3][4] = {{0.5f, 0.5f, 0.5f, 0.0f}, {0.3f, 0.3f, 0.3f, 0.0f}, {0.2f, 0.2f, 0.2f, 0.0f}};
+	const float ambient[4] = {0.5f, 0.5f, 0.5f, 0.0f};
+	for (int i = 0; i < 3; i++)
+	{
+		for (int k = 0; k < 4; k++)
+		{
+			Ps2Memcard_PutFloat(&sys[0x050 + i * 16 + k * 4], lightDir[i][k]);
+			Ps2Memcard_PutFloat(&sys[0x080 + i * 16 + k * 4], lightCol[i][k]);
+		}
+	}
+	for (int k = 0; k < 4; k++)
+	{
+		Ps2Memcard_PutFloat(&sys[0x0b0 + k * 4], ambient[k]);
+	}
+	// El mismo icono para ver, copiar y borrar.
+	strcpy((char *)&sys[0x104], PS2_MC_ICON_FILE);
+	strcpy((char *)&sys[0x144], PS2_MC_ICON_FILE);
+	strcpy((char *)&sys[0x184], PS2_MC_ICON_FILE);
+
+	FILE *f = fopen(path, "wb");
+	if (f == NULL)
+	{
+		return 0;
+	}
+	const size_t wrote = fwrite(sys, 1, sizeof(sys), f);
+	fclose(f);
+	return wrote == sizeof(sys);
+}
+
+// Color de la textura (128x128, 16 bits: R 5 | G 5 | B 5 | A 1).
+internal u16 Ps2Memcard_Rgb(u32 r, u32 g, u32 b)
+{
+	return (u16)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10) | 0x8000);
+}
+
+internal int Ps2Memcard_WriteIcon(const char *path)
+{
+	// Placa de dos caras (12 vertices), coordenadas en 1/4096.
+	enum
+	{
+		VERTS = 12,
+		HEADER = 20,
+		VERT_BYTES = 24,
+		ANIM = 20,
+		FRAME = 16,
+		TEX = 128 * 128 * 2
+	};
+	static u8 ico[HEADER + VERTS * VERT_BYTES + ANIM + FRAME + TEX];
+	memset(ico, 0, sizeof(ico));
+	Ps2Memcard_Put32(&ico[0], 0x00010000); // version
+	Ps2Memcard_Put32(&ico[4], 1);          // formas de animacion
+	Ps2Memcard_Put32(&ico[8], 0x07);       // textura sin comprimir
+	Ps2Memcard_PutFloat(&ico[12], 1.0f);
+	Ps2Memcard_Put32(&ico[16], VERTS);
+
+	// Esquinas de la placa: x de -1,4 a 1,4; y de -1,4 (arriba) a 1,0.
+	const s32 x0 = -5734, x1 = 5734, yTop = -5734, yBottom = 4096;
+	// Cara delantera (normal hacia -z) y trasera (+z), dos triangulos cada una.
+	const s32 quad[6][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 0}, {1, 1}, {0, 1}};
+	u8 *v = &ico[HEADER];
+	for (int face = 0; face < 2; face++)
+	{
+		for (int i = 0; i < 6; i++)
+		{
+			// La cara trasera recorre los triangulos al reves.
+			const int idx = (face == 0) ? i : (5 - i);
+			const s32 qx = quad[idx][0];
+			const s32 qy = quad[idx][1];
+			Ps2Memcard_Put16(&v[0], (u32)(u16)(s16)(qx ? x1 : x0));
+			Ps2Memcard_Put16(&v[2], (u32)(u16)(s16)(qy ? yBottom : yTop));
+			Ps2Memcard_Put16(&v[4], (u32)(u16)(s16)((face == 0) ? -200 : 200));
+			Ps2Memcard_Put16(&v[6], 0);
+			Ps2Memcard_Put16(&v[8], 0);
+			Ps2Memcard_Put16(&v[10], 0);
+			Ps2Memcard_Put16(&v[12], (u32)(u16)(s16)((face == 0) ? -4096 : 4096));
+			Ps2Memcard_Put16(&v[14], 0);
+			Ps2Memcard_Put16(&v[16], (u32)(qx ? 4096 : 0));
+			Ps2Memcard_Put16(&v[18], (u32)(qy ? 4096 : 0));
+			v[20] = 0x80;
+			v[21] = 0x80;
+			v[22] = 0x80;
+			v[23] = 0x80;
+			v += VERT_BYTES;
+		}
+	}
+
+	// Animacion: una sola forma, sin movimiento.
+	u8 *a = &ico[HEADER + VERTS * VERT_BYTES];
+	Ps2Memcard_Put32(&a[0], 0x01);
+	Ps2Memcard_Put32(&a[4], 1);
+	Ps2Memcard_PutFloat(&a[8], 1.0f);
+	Ps2Memcard_Put32(&a[12], 0);
+	Ps2Memcard_Put32(&a[16], 1);
+	u8 *fr = &a[ANIM];
+	Ps2Memcard_Put32(&fr[0], 0); // forma 0
+	Ps2Memcard_Put32(&fr[4], 1); // 1 clave (sin datos extra)
+	Ps2Memcard_Put32(&fr[8], 1);
+	Ps2Memcard_Put32(&fr[12], 1);
+
+	// Textura: bandera de cuadros 8x8 con borde naranja y franja azul.
+	u8 *t = &fr[FRAME];
+	for (int y = 0; y < 128; y++)
+	{
+		for (int x = 0; x < 128; x++)
+		{
+			u16 c;
+			if ((x < 8) || (x >= 120) || (y < 8) || (y >= 120))
+			{
+				c = Ps2Memcard_Rgb(0xff, 0x80, 0x00); // borde
+			}
+			else if ((y >= 92) && (y < 104))
+			{
+				c = Ps2Memcard_Rgb(0x20, 0x60, 0xff); // franja
+			}
+			else
+			{
+				const int cell = (((x - 8) / 14) + ((y - 8) / 14)) & 1;
+				c = cell ? Ps2Memcard_Rgb(0x10, 0x10, 0x10) : Ps2Memcard_Rgb(0xf0, 0xf0, 0xf0);
+			}
+			Ps2Memcard_Put16(&t[(y * 128 + x) * 2], c);
+		}
+	}
+
+	FILE *f = fopen(path, "wb");
+	if (f == NULL)
+	{
+		return 0;
+	}
+	const size_t wrote = fwrite(ico, 1, sizeof(ico), f);
+	fclose(f);
+	return wrote == sizeof(ico);
+}
+
+// Crea icon.sys y el icono en la carpeta raiz si faltan (solo memory card).
+internal void Ps2Memcard_EnsureIcon(const char *root)
+{
+	static int s_iconChecked = 0;
+	if (s_iconChecked || (root == NULL) || (strncmp(root, "mc", 2) != 0))
+	{
+		return;
+	}
+	s_iconChecked = 1; // una vez por sesion
+	char path[NATIVE_MEMCARD_MAX_PATH];
+	snprintf(path, sizeof(path), "%s/icon.sys", root);
+	FILE *f = fopen(path, "rb");
+	if (f != NULL)
+	{
+		fclose(f);
+		return; // ya esta
+	}
+	const int sysOk = Ps2Memcard_WriteIconSys(path);
+	snprintf(path, sizeof(path), "%s/%s", root, PS2_MC_ICON_FILE);
+	const int icoOk = Ps2Memcard_WriteIcon(path);
+	printf("[CTR PS2] memory card: icono %s (icon.sys %s, %s %s)\n", (sysOk && icoOk) ? "creado" : "NO creado", sysOk ? "ok" : "fallo", PS2_MC_ICON_FILE,
+	       icoOk ? "ok" : "fallo");
+}
+#endif
+
 internal int NativeMemcard_EnsureSlotRoot(const char *root, int slot)
 {
 	char slotRoot[NATIVE_MEMCARD_MAX_PATH];
@@ -214,6 +452,9 @@ internal int NativeMemcard_EnsureSlotRoot(const char *root, int slot)
 	{
 		return 0;
 	}
+#if defined(CTR_PS2)
+	Ps2Memcard_EnsureIcon(root);
+#endif
 	if (!NativeMemcard_BuildSlotRoot(slotRoot, sizeof(slotRoot), root, slot))
 	{
 		return 0;
@@ -573,6 +814,18 @@ enum NativeMemcardResult NativeMemcard_SetRoot(const char *root_path)
 	}
 
 	memset(&s_memcardFind, 0, sizeof(s_memcardFind));
+#if defined(CTR_PS2)
+	// Si la carpeta ya existe (partidas de antes, sin icono), ponerle el icono al
+	// arrancar: deja de salir como "datos danados" sin tener que guardar.
+	{
+		DIR *existing = opendir(s_memcardRoot);
+		if (existing != NULL)
+		{
+			closedir(existing);
+			Ps2Memcard_EnsureIcon(s_memcardRoot);
+		}
+	}
+#endif
 	return NATIVE_MEMCARD_OK;
 }
 
