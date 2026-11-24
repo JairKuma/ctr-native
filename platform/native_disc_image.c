@@ -567,6 +567,17 @@ void NativeDiscImage_Ps2PrefetchPoll(void)
 	}
 }
 
+// Para el cuadrito de diagnostico: 0 sin carga, 1 carga esperando al lector
+// (bloque pedido), 2 carga sin bloque pedido.
+int NativeDiscImage_Ps2JobDebugState(void)
+{
+	if (!s_ps2JobActive)
+	{
+		return 0;
+	}
+	return s_ps2JobPending ? 1 : 2;
+}
+
 // 1 si se puede leer en segundo plano (imagen en el disco de la PS2).
 int NativeDiscImage_Ps2JobCanStart(void)
 {
