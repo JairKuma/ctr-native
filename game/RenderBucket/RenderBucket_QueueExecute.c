@@ -1121,6 +1121,17 @@ static struct ModelHeader *RenderBucket_SelectModelHeader(struct Instance *inst,
 		}
 	}
 
+#ifdef CTR_PS2
+	// PS2: en pantalla partida (2 jugadores, Arcade con bots) los karts lejanos
+	// se quedaban sin ningun LOD y desaparecian (solo se veia su humo). Para los
+	// karts se usa el ultimo LOD (el mas sencillo) en vez de no dibujarlos.
+	if ((inst->thread != 0) && ((inst->thread->modelIndex == DYNAMIC_PLAYER) || (inst->thread->modelIndex == DYNAMIC_ROBOT_CAR)))
+	{
+		*lodIndexOut = lodIndex - 1;
+		return mh - 1;
+	}
+#endif
+
 	*lodExhaustedOut = 1;
 	return 0;
 }
