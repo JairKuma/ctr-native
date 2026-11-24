@@ -73,7 +73,6 @@
 // native_renderer.c y native_glad.c, y dan la salida de audio).
 #include "platform/ps2/ps2_audio_out.c"
 #include "platform/ps2/ps2_input.c"
-#include "platform/ps2/ps2_demo_roulette.c"
 #include "platform/ps2/ps2_platform.c"
 #include "platform/ps2/ps2_renderer.c"
 
@@ -395,9 +394,6 @@ int main(int argc, char *argv[])
 		SleepThread();
 		return 1;
 	}
-
-	// Melodia de la ruleta de la demo, si el usuario puso DEMO.HWL en el disco.
-	Ps2DemoRoulette_Init();
 
 	Platform_Init("Crash Team Racing", 640, 448);
 	Platform_InitScratchpad();
