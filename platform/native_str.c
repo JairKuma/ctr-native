@@ -90,6 +90,18 @@ struct NativeSTRAcGroup
 
 global_variable struct NativeSTRState s_str;
 
+#if defined(CTR_PS2)
+// Medidor del video por partes (ciclos de la EE): leer codigos, IDCT, color.
+global_variable u32 s_strProfIdct = 0;
+global_variable u32 s_strProfColor = 0;
+static inline u32 NativeSTR_ProfNow(void)
+{
+	u32 c;
+	__asm__ volatile("mfc0 %0, $9" : "=r"(c));
+	return c;
+}
+#endif
+
 // NOTE(aalhendi): MDEC tables and BS v1/v2/v3 Huffman groups are transcribed
 // from psx-spx's documented PS1 MDEC/STR format.
 global_variable const u8 s_mdecZagzig[64] = {
@@ -633,7 +645,13 @@ internal s32 NativeSTR_DecodeBlock(struct NativeSTRBitReader *br, s32 quant, s32
 		coefficients[target] = (NativeSTR_Sign10(code) * s_mdecQuantTable[target] * quant + 4) / 8;
 	}
 
+#if defined(CTR_PS2)
+	const u32 idctStart = NativeSTR_ProfNow();
 	NativeSTR_IDCT(coefficients, out);
+	s_strProfIdct += NativeSTR_ProfNow() - idctStart;
+#else
+	NativeSTR_IDCT(coefficients, out);
+#endif
 	return 1;
 }
 
@@ -661,6 +679,7 @@ internal s32 NativeSTR_DecodeMacroblock(struct NativeSTRBitReader *br, s32 quant
 #if defined(CTR_PS2)
 	// PS2: los 4 pixeles de cada cuadro de 2x2 comparten el color (Cr/Cb): sus
 	// terminos se calculan una vez. Mismas formulas, mismo resultado.
+	const u32 colorStart = NativeSTR_ProfNow();
 	for (s32 cy = 0; cy < 8; cy++)
 	{
 		for (s32 cx = 0; cx < 8; cx++)
@@ -696,6 +715,7 @@ internal s32 NativeSTR_DecodeMacroblock(struct NativeSTRBitReader *br, s32 quant
 			}
 		}
 	}
+	s_strProfColor += NativeSTR_ProfNow() - colorStart;
 	return 1;
 #endif
 
@@ -1163,14 +1183,27 @@ s32 NativeSTR_UploadNextFrame(s32 dstX, s32 dstY)
 	s_strStatDecodeCycles += t2 - t1;
 	if (++s_strStatFrames >= 60)
 	{
-		// Count va a 294,912 MHz: ciclos / 294912 = ms.
-		printf("[CTR PS2] video: %u fotogramas | leer %u.%u ms/fotograma | descomprimir %u.%u ms/fotograma (%dx%d)\n", (unsigned)s_strStatFrames,
-		       (unsigned)(s_strStatReadCycles / s_strStatFrames / 294912u), (unsigned)((s_strStatReadCycles / s_strStatFrames / 29491u) % 10u),
-		       (unsigned)(s_strStatDecodeCycles / s_strStatFrames / 294912u), (unsigned)((s_strStatDecodeCycles / s_strStatFrames / 29491u) % 10u),
-		       (int)s_str.width, (int)s_str.height);
+		// Count va a 294,912 MHz: ciclos / 294912 = ms. "codigos" = descomprimir
+		// menos IDCT y color (lectura de bits y tabla de codigos).
+		const u32 n = s_strStatFrames;
+		const u32 other = (s_strStatDecodeCycles > s_strProfIdct + s_strProfColor) ? (s_strStatDecodeCycles - s_strProfIdct - s_strProfColor) : 0u;
+		printf("[CTR PS2] video: %u fotogramas | leer %u.%u ms | descomprimir %u.%u ms/fotograma (codigos %u.%u | IDCT %u.%u | color %u.%u) (%dx%d) | "
+		       "decimales: %s\n",
+		       (unsigned)n, (unsigned)(s_strStatReadCycles / n / 294912u), (unsigned)((s_strStatReadCycles / n / 29491u) % 10u),
+		       (unsigned)(s_strStatDecodeCycles / n / 294912u), (unsigned)((s_strStatDecodeCycles / n / 29491u) % 10u), (unsigned)(other / n / 294912u),
+		       (unsigned)((other / n / 29491u) % 10u), (unsigned)(s_strProfIdct / n / 294912u), (unsigned)((s_strProfIdct / n / 29491u) % 10u),
+		       (unsigned)(s_strProfColor / n / 294912u), (unsigned)((s_strProfColor / n / 29491u) % 10u), (int)s_str.width, (int)s_str.height,
+#if defined(__mips_soft_float)
+		       "SOFTWARE (lento)"
+#else
+		       "hardware"
+#endif
+		);
 		s_strStatFrames = 0;
 		s_strStatReadCycles = 0;
 		s_strStatDecodeCycles = 0;
+		s_strProfIdct = 0;
+		s_strProfColor = 0;
 	}
 	if (!readOk || !decodeOk)
 	{
