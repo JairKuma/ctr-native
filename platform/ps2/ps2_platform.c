@@ -168,6 +168,9 @@ internal void Ps2_WaitAndEmitVBlank(void)
 // (4 VBlanks o mas) y en que se fue el tiempo. Diagnostico (primeros 80).
 extern unsigned long long g_ps2ProfJobCycles;         // native_cd.c
 extern unsigned long long g_ps2ProfJobCallbackCycles; // native_cd.c
+extern u32 g_ps2DebugCornerColor;                      // ps2_renderer.c
+int NativeDiscImage_Ps2JobDebugState(void);           // native_disc_image.c
+void NativeDiscImage_Ps2JobDebugPrint(void);
 
 internal u32 Ps2_ProfDeltaMs(unsigned long long now, unsigned long long *last)
 {
@@ -215,6 +218,7 @@ internal void Ps2_ReportSlowLoadFrame(void)
 		{
 			lastStage = stage;
 			stageSinceHw = hw;
+			g_ps2DebugCornerColor = 0; // la carga avanzo: quitar el cuadrito
 		}
 		else if ((stage != LOAD_IDLE) && ((hw - stageSinceHw) >= 600u) && ((hw - lastReportHw) >= 600u))
 		{
@@ -223,7 +227,39 @@ internal void Ps2_ReportSlowLoadFrame(void)
 			       stage, (unsigned)((hw - stageSinceHw) / 60u), (int)sdata->queueLength, (int)sdata->queueReady, (int)sdata->queueRetry, (int)sdata->XA_State,
 			       (int)sdata->bool_IsLoaded_VlcTable, (int)sdata->mainGameState);
 			NativeDiscImage_Ps2JobDebugPrint();
+
+			// Cuadrito de color en la esquina (para la PS2 real, que no tiene log):
+			//   amarillo  carga esperando al lector (bloque pedido que no llega)
+			//   naranja   carga en marcha sin bloque pedido (lector ocupado / parada)
+			//   morado    la cola espera a que acabe una voz o musica XA
+			//   rojo      hay archivos en cola pero la cola no se pone en marcha
+			//   azul      cola vacia y sin carga: el juego espera otra cosa
+			const int jobState = NativeDiscImage_Ps2JobDebugState();
+			if (jobState == 1)
+			{
+				g_ps2DebugCornerColor = 0xffff00;
+			}
+			else if (jobState == 2)
+			{
+				g_ps2DebugCornerColor = 0xff8000;
+			}
+			else if (sdata->XA_State != 0)
+			{
+				g_ps2DebugCornerColor = 0xa000ff;
+			}
+			else if ((sdata->queueLength != 0) && (sdata->queueReady == 0))
+			{
+				g_ps2DebugCornerColor = 0xff0000;
+			}
+			else
+			{
+				g_ps2DebugCornerColor = 0x0060ff;
+			}
 		}
+	}
+	if (sdata->Loading.stage == LOAD_IDLE)
+	{
+		g_ps2DebugCornerColor = 0;
 	}
 }
 
