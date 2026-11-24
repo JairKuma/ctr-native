@@ -440,105 +440,154 @@ internal s32 NativeSTR_ReadAcCode(struct NativeSTRBitReader *br, u16 *outCode)
 // preserving unrounded s64 row transforms and applying the same final rounding.
 // Zero coefficient rows are skipped before the column pass.
 #if defined(CTR_PS2)
-// PS2: IDCT en coma flotante simple (la EE no tiene multiplicacion ni division
-// de 64 bits: el original llamaba a funciones lentas ~20000 veces por fotograma).
-// Mismas formulas y mismo redondeo final; puede variar 1 en algun pixel.
-global_variable float s_idctBasisF[8][8];
-global_variable int s_idctBasisReady = 0;
+// PS2: IDCT rapida con enteros de 32 bits (algoritmo LLM, el mismo que usa la
+// IDCT "islow" de libjpeg del IJG; metodo de los decodificadores
+// JPEG/MPEG: ~200 multiplicaciones por bloque en vez de ~1000). Los
+// coeficientes llegan limitados a +-16383 (NativeSTR_DecodeBlock), asi que
+// nunca se desborda. Puede variar 1 en algun valor respecto al calculo exacto
+// (redondeo). Probado en PC: 200.000 bloques, diferencia maxima 1.
+#define NATIVE_STR_IDCT_CONST_BITS 13
+#define NATIVE_STR_IDCT_PASS1_BITS 2
+#define NATIVE_STR_FIX_0_298631336 2446
+#define NATIVE_STR_FIX_0_390180644 3196
+#define NATIVE_STR_FIX_0_541196100 4433
+#define NATIVE_STR_FIX_0_765366865 6270
+#define NATIVE_STR_FIX_0_899976223 7373
+#define NATIVE_STR_FIX_1_175875602 9633
+#define NATIVE_STR_FIX_1_501321110 12299
+#define NATIVE_STR_FIX_1_847759065 15137
+#define NATIVE_STR_FIX_1_961570560 16069
+#define NATIVE_STR_FIX_2_053119869 16819
+#define NATIVE_STR_FIX_2_562915447 20995
+#define NATIVE_STR_FIX_3_072711026 25172
+#define NATIVE_STR_DESCALE(x, n) (((x) + (1 << ((n) - 1))) >> (n))
 
 internal void NativeSTR_IDCT(const s32 *coefficients, s32 *out)
 {
-	float rowPass[64];
-	s32 nonZeroRows[8];
-	s32 rowCount = 0;
+	s32 ws[64];
 
-	if (!s_idctBasisReady)
+	// Pasada 1: columnas (entrada coefficients[fila * 8 + columna]).
+	for (s32 c = 0; c < 8; c++)
 	{
-		for (s32 a = 0; a < 8; a++)
+		const s32 *in = &coefficients[c];
+		s32 *w = &ws[c];
+		if ((in[8] | in[16] | in[24] | in[32] | in[40] | in[48] | in[56]) == 0)
 		{
-			for (s32 b = 0; b < 8; b++)
+			const s32 dc = in[0] * (1 << NATIVE_STR_IDCT_PASS1_BITS);
+			for (s32 r = 0; r < 8; r++)
 			{
-				// basis / 2^14; el producto de dos queda dividido entre 2^28 y
-				// el original divide entre 2^30 (x4): se aplica al final.
-				s_idctBasisF[a][b] = (float)s_idctBasis[a][b] * (1.0f / 16384.0f);
+				w[r * 8] = dc;
 			}
-		}
-		s_idctBasisReady = 1;
-	}
-
-	for (s32 v = 0; v < 8; v++)
-	{
-		const s32 *row = &coefficients[v * 8];
-		s32 lastNonZero = -1;
-		for (s32 u = 0; u < 8; u++)
-		{
-			if (row[u] != 0)
-			{
-				lastNonZero = u;
-			}
-		}
-		if (lastNonZero < 0)
-		{
 			continue;
 		}
-		nonZeroRows[rowCount++] = v;
-		for (s32 x = 0; x < 8; x++)
-		{
-			float sum = 0.0f;
-			for (s32 u = 0; u <= lastNonZero; u++)
-			{
-				sum += s_idctBasisF[x][u] * (float)row[u];
-			}
-			rowPass[v * 8 + x] = sum;
-		}
+		s32 z2 = in[16];
+		s32 z3 = in[48];
+		s32 z1 = (z2 + z3) * NATIVE_STR_FIX_0_541196100;
+		s32 tmp2 = z1 + z3 * (-NATIVE_STR_FIX_1_847759065);
+		s32 tmp3 = z1 + z2 * NATIVE_STR_FIX_0_765366865;
+		z2 = in[0];
+		z3 = in[32];
+		s32 tmp0 = (z2 + z3) * (1 << NATIVE_STR_IDCT_CONST_BITS);
+		s32 tmp1 = (z2 - z3) * (1 << NATIVE_STR_IDCT_CONST_BITS);
+		const s32 tmp10 = tmp0 + tmp3;
+		const s32 tmp13 = tmp0 - tmp3;
+		const s32 tmp11 = tmp1 + tmp2;
+		const s32 tmp12 = tmp1 - tmp2;
+
+		tmp0 = in[56];
+		tmp1 = in[40];
+		tmp2 = in[24];
+		tmp3 = in[8];
+		z1 = tmp0 + tmp3;
+		z2 = tmp1 + tmp2;
+		z3 = tmp0 + tmp2;
+		s32 z4 = tmp1 + tmp3;
+		const s32 z5 = (z3 + z4) * NATIVE_STR_FIX_1_175875602;
+		tmp0 *= NATIVE_STR_FIX_0_298631336;
+		tmp1 *= NATIVE_STR_FIX_2_053119869;
+		tmp2 *= NATIVE_STR_FIX_3_072711026;
+		tmp3 *= NATIVE_STR_FIX_1_501321110;
+		z1 *= -NATIVE_STR_FIX_0_899976223;
+		z2 *= -NATIVE_STR_FIX_2_562915447;
+		z3 *= -NATIVE_STR_FIX_1_961570560;
+		z4 *= -NATIVE_STR_FIX_0_390180644;
+		z3 += z5;
+		z4 += z5;
+		tmp0 += z1 + z3;
+		tmp1 += z2 + z4;
+		tmp2 += z2 + z3;
+		tmp3 += z1 + z4;
+
+		const s32 sh = NATIVE_STR_IDCT_CONST_BITS - NATIVE_STR_IDCT_PASS1_BITS;
+		w[0] = NATIVE_STR_DESCALE(tmp10 + tmp3, sh);
+		w[56] = NATIVE_STR_DESCALE(tmp10 - tmp3, sh);
+		w[8] = NATIVE_STR_DESCALE(tmp11 + tmp2, sh);
+		w[48] = NATIVE_STR_DESCALE(tmp11 - tmp2, sh);
+		w[16] = NATIVE_STR_DESCALE(tmp12 + tmp1, sh);
+		w[40] = NATIVE_STR_DESCALE(tmp12 - tmp1, sh);
+		w[24] = NATIVE_STR_DESCALE(tmp13 + tmp0, sh);
+		w[32] = NATIVE_STR_DESCALE(tmp13 - tmp0, sh);
 	}
 
-	if (rowCount == 0)
+	// Pasada 2: filas (salida out[y * 8 + x], dividida entre 8 al final).
+	const s32 sh2 = NATIVE_STR_IDCT_CONST_BITS + NATIVE_STR_IDCT_PASS1_BITS + 3;
+	for (s32 r = 0; r < 8; r++)
 	{
-		memset(out, 0, 64 * sizeof(s32));
-		return;
-	}
+		const s32 *w = &ws[r * 8];
+		s32 *o = &out[r * 8];
+		if ((w[1] | w[2] | w[3] | w[4] | w[5] | w[6] | w[7]) == 0)
+		{
+			const s32 v = NATIVE_STR_DESCALE(w[0], NATIVE_STR_IDCT_PASS1_BITS + 3);
+			for (s32 x = 0; x < 8; x++)
+			{
+				o[x] = v;
+			}
+			continue;
+		}
+		s32 z2 = w[2];
+		s32 z3 = w[6];
+		s32 z1 = (z2 + z3) * NATIVE_STR_FIX_0_541196100;
+		s32 tmp2 = z1 + z3 * (-NATIVE_STR_FIX_1_847759065);
+		s32 tmp3 = z1 + z2 * NATIVE_STR_FIX_0_765366865;
+		s32 tmp0 = (w[0] + w[4]) * (1 << NATIVE_STR_IDCT_CONST_BITS);
+		s32 tmp1 = (w[0] - w[4]) * (1 << NATIVE_STR_IDCT_CONST_BITS);
+		const s32 tmp10 = tmp0 + tmp3;
+		const s32 tmp13 = tmp0 - tmp3;
+		const s32 tmp11 = tmp1 + tmp2;
+		const s32 tmp12 = tmp1 - tmp2;
 
-	// Bloque liso (solo el primer coeficiente): los 64 valores son iguales.
-	// Mismas operaciones que el caso general, hechas una vez.
-	if ((rowCount == 1) && (nonZeroRows[0] == 0))
-	{
-		s32 onlyDc = 1;
-		for (s32 u = 1; u < 8; u++)
-		{
-			if (coefficients[u] != 0)
-			{
-				onlyDc = 0;
-				break;
-			}
-		}
-		if (onlyDc)
-		{
-			float sum = 0.0f + s_idctBasisF[0][0] * rowPass[0];
-			sum *= 0.25f;
-			const s32 value = (sum >= 0.0f) ? (s32)(sum + 0.5f) : -(s32)(0.5f - sum);
-			for (s32 i = 0; i < 64; i++)
-			{
-				out[i] = value;
-			}
-			return;
-		}
-	}
+		tmp0 = w[7];
+		tmp1 = w[5];
+		tmp2 = w[3];
+		tmp3 = w[1];
+		z1 = tmp0 + tmp3;
+		z2 = tmp1 + tmp2;
+		z3 = tmp0 + tmp2;
+		s32 z4 = tmp1 + tmp3;
+		const s32 z5 = (z3 + z4) * NATIVE_STR_FIX_1_175875602;
+		tmp0 *= NATIVE_STR_FIX_0_298631336;
+		tmp1 *= NATIVE_STR_FIX_2_053119869;
+		tmp2 *= NATIVE_STR_FIX_3_072711026;
+		tmp3 *= NATIVE_STR_FIX_1_501321110;
+		z1 *= -NATIVE_STR_FIX_0_899976223;
+		z2 *= -NATIVE_STR_FIX_2_562915447;
+		z3 *= -NATIVE_STR_FIX_1_961570560;
+		z4 *= -NATIVE_STR_FIX_0_390180644;
+		z3 += z5;
+		z4 += z5;
+		tmp0 += z1 + z3;
+		tmp1 += z2 + z4;
+		tmp2 += z2 + z3;
+		tmp3 += z1 + z4;
 
-	for (s32 y = 0; y < 8; y++)
-	{
-		for (s32 x = 0; x < 8; x++)
-		{
-			float sum = 0.0f;
-			for (s32 i = 0; i < rowCount; i++)
-			{
-				const s32 v = nonZeroRows[i];
-				sum += s_idctBasisF[y][v] * rowPass[v * 8 + x];
-			}
-			sum *= 0.25f;
-			// Redondeo como el original: la mitad se aleja de cero.
-			out[y * 8 + x] = (sum >= 0.0f) ? (s32)(sum + 0.5f) : -(s32)(0.5f - sum);
-		}
+		o[0] = NATIVE_STR_DESCALE(tmp10 + tmp3, sh2);
+		o[7] = NATIVE_STR_DESCALE(tmp10 - tmp3, sh2);
+		o[1] = NATIVE_STR_DESCALE(tmp11 + tmp2, sh2);
+		o[6] = NATIVE_STR_DESCALE(tmp11 - tmp2, sh2);
+		o[2] = NATIVE_STR_DESCALE(tmp12 + tmp1, sh2);
+		o[5] = NATIVE_STR_DESCALE(tmp12 - tmp1, sh2);
+		o[3] = NATIVE_STR_DESCALE(tmp13 + tmp0, sh2);
+		o[4] = NATIVE_STR_DESCALE(tmp13 - tmp0, sh2);
 	}
 }
 #else
@@ -643,6 +692,18 @@ internal s32 NativeSTR_DecodeBlock(struct NativeSTRBitReader *br, s32 quant, s32
 
 		target = s_mdecZagzig[k];
 		coefficients[target] = (NativeSTR_Sign10(code) * s_mdecQuantTable[target] * quant + 4) / 8;
+#if defined(CTR_PS2)
+		// Limite para que la IDCT de 32 bits nunca se desborde. Un coeficiente asi
+		// ya satura el pixel a blanco o negro: no cambia nada visible.
+		if (coefficients[target] > 16383)
+		{
+			coefficients[target] = 16383;
+		}
+		else if (coefficients[target] < -16383)
+		{
+			coefficients[target] = -16383;
+		}
+#endif
 	}
 
 #if defined(CTR_PS2)
