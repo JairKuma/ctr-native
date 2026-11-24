@@ -106,6 +106,8 @@ internal void Ps2_EmitVBlank(void)
 	}
 
 	NativeAudio_StepVBlank();
+	// Melodia de la ruleta de la demo (ps2_demo_roulette.c), si esta sonando.
+	Ps2DemoRoulette_Tick();
 	// Lo que el juego ha cambiado en las voces este VBlank (key on/off,
 	// volumenes, tono...) se manda de una vez al chip SPU2 (ps2_spu2.c).
 	Ps2Spu2_Flush();

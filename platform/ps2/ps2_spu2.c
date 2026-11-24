@@ -714,6 +714,37 @@ void Ps2Spu2_XaStop(void)
 	Ps2Spu2_SendNow(b, 3);
 }
 
+// Voces extra del core 1 (la 0 y la 1 son de la XA). Mandan al momento.
+void Ps2Spu2_ExtraVoiceOn(int voice, unsigned int spuAddr, unsigned int psxPitch, int volumeLeft, int volumeRight, unsigned int adsr1, unsigned int adsr2)
+{
+	sceSdBatch b[8];
+	int n = 0;
+	if ((voice < 2) || (voice >= PS2_SPU2_VOICES))
+	{
+		return;
+	}
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETADDR, Ps2Spu2_Core1Voice(voice, SD_VADDR_SSA), spuAddr);
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(voice, SD_VPARAM_ADSR1), adsr1 & 0xFFFFu);
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(voice, SD_VPARAM_ADSR2), adsr2 & 0xFFFFu);
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(voice, SD_VPARAM_PITCH), Ps2Spu2_ConvertPitch(psxPitch));
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(voice, SD_VPARAM_VOLL), Ps2Spu2_ClampVolume(volumeLeft));
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETPARAM, Ps2Spu2_Core1Voice(voice, SD_VPARAM_VOLR), Ps2Spu2_ClampVolume(volumeRight));
+	Ps2Spu2_SetEntry(&b[n++], SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_KON, 1u << voice);
+	Ps2Spu2_SendNow(b, n);
+}
+
+void Ps2Spu2_ExtraVoiceOff(unsigned int voiceBits)
+{
+	sceSdBatch b[1];
+	voiceBits &= ~0x3u; // nunca las voces de la XA
+	if (voiceBits == 0)
+	{
+		return;
+	}
+	Ps2Spu2_SetEntry(&b[0], SD_BATCH_SETSWITCH, PS2_SPU2_CORE1 | SD_SWITCH_KOFF, voiceBits);
+	Ps2Spu2_SendNow(b, 1);
+}
+
 void Ps2Spu2_VoiceUpdate(int voice, unsigned int what, int volumeLeft, int volumeRight, unsigned int pitch, unsigned int startAddr, unsigned int loopAddr,
                          unsigned int adsr1, unsigned int adsr2)
 {

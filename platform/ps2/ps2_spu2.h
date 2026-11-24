@@ -54,6 +54,13 @@ void Ps2Spu2_XaPitch(unsigned int pitch);
 void Ps2Spu2_XaVolume(int volumeLeft, int volumeRight);
 void Ps2Spu2_XaStop(void);
 
+// --- Voces extra del core 1 (2..23), libres: melodia de la ruleta de la demo --
+// Direccion en bytes de la RAM de la SPU2 (zona libre 0x0E0000-0x0FFFFF), tono
+// y volumen en unidades de PS1, envolvente ADSR en formato PS1 (igual que SPU2).
+#define PS2_SPU2_EXTRA_BASE 0x0E0000u
+void Ps2Spu2_ExtraVoiceOn(int voice, unsigned int spuAddr, unsigned int psxPitch, int volumeLeft, int volumeRight, unsigned int adsr1, unsigned int adsr2);
+void Ps2Spu2_ExtraVoiceOff(unsigned int voiceBits);
+
 // Informe para el log (cada ~5 s). totalCycles = ciclos de la EE del periodo.
 void Ps2Spu2_Report(unsigned long long totalCycles);
 
