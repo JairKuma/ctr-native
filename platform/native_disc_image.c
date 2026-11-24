@@ -567,6 +567,53 @@ void NativeDiscImage_Ps2PrefetchPoll(void)
 	}
 }
 
+// Videos (native_str.c): 1 si los sectores [sector, sector+count) del archivo
+// ya estan en la cache y se pueden leer sin esperar. Si no, pide al lector el
+// bloque que falta en 2o plano (o recoge el que ya se pidio) y devuelve 0: el
+// video espera un fotograma en vez de parar el juego. Con una carga del juego en
+// marcha devuelve 1 (se lee de la forma normal, como antes).
+int NativeDiscImage_Ps2EnsureCached(const struct NativeDiscImageFile *file, u32 sector, u32 count)
+{
+	if ((file == NULL) || !s_ps2CdDirect || s_ps2JobActive || g_ps2DiscReadBusy || g_ps2DiscXaRead)
+	{
+		return 1;
+	}
+	const u32 fileSectors = NativeDiscImage_DataSectorCount(file->size);
+	if (sector >= fileSectors)
+	{
+		return 1;
+	}
+	if (count > fileSectors - sector)
+	{
+		count = fileSectors - sector;
+	}
+	for (u32 i = 0; i < count; i++)
+	{
+		const u32 lba = file->lba + sector + i;
+		if (NativeDiscImage_Ps2GameSlotHas(lba))
+		{
+			continue;
+		}
+		if (s_ps2JobPending)
+		{
+			const int r = NativeDiscImage_Ps2JobCollect(0);
+			if (r == 0)
+			{
+				return 0; // aun leyendo
+			}
+			if (r < 0)
+			{
+				return 1; // fallo del lector: leer de la forma normal
+			}
+			i--; // recogido: volver a mirar este sector
+			continue;
+		}
+		const int r = NativeDiscImage_Ps2JobRequest(lba);
+		return (r < 0) ? 1 : 0;
+	}
+	return 1;
+}
+
 // Para el cuadrito de diagnostico: 0 sin carga, 1 carga esperando al lector
 // (bloque pedido), 2 carga sin bloque pedido.
 int NativeDiscImage_Ps2JobDebugState(void)

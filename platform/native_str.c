@@ -954,6 +954,10 @@ void NativeSTR_Stop(void)
 	s_str.frameSize = 0;
 }
 
+#if defined(CTR_PS2)
+int NativeDiscImage_Ps2EnsureCached(const struct NativeDiscImageFile *file, u32 sector, u32 count);
+#endif
+
 s32 NativeSTR_UploadNextFrame(s32 dstX, s32 dstY)
 {
 	RECT16 rect;
@@ -962,6 +966,24 @@ s32 NativeSTR_UploadNextFrame(s32 dstX, s32 dstY)
 	{
 		return 0;
 	}
+
+#if defined(CTR_PS2)
+	// PS2: si los datos del siguiente fotograma aun no estan leidos, pedirlos en
+	// 2o plano y no actualizar el video este fotograma (antes el juego se paraba
+	// a leer: tiron al empezar cada video). Al empezar se ve la imagen fija.
+	if ((s_str.source == NATIVE_STR_SOURCE_DISC) && (s_str.format == NATIVE_STR_FORMAT_EXTRACTED))
+	{
+		u32 nextSector = s_str.currentSector;
+		if ((s_str.frameLimit > 0) && (s_str.frameIndex >= s_str.frameLimit))
+		{
+			nextSector = s_str.fileBaseSector; // va a volver al principio
+		}
+		if (!NativeDiscImage_Ps2EnsureCached(&s_str.discFile, nextSector, NATIVE_STR_MAX_FRAME_SECTORS))
+		{
+			return 0;
+		}
+	}
+#endif
 
 #if defined(CTR_PS2)
 	// Medidor: tiempo de leer + descomprimir cada fotograma del video (log cada
