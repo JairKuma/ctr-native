@@ -1,16 +1,5 @@
 #include <common.h>
 
-#if defined(CTR_PS2)
-int Ps2DemoRoulette_Start(void); // platform/ps2/ps2_demo_roulette.c
-void Ps2DemoRoulette_Stop(void);
-static inline void Ps2DemoRoulette_StopIfPs2(void)
-{
-	Ps2DemoRoulette_Stop();
-}
-#else
-#define Ps2DemoRoulette_StopIfPs2() ((void)0)
-#endif
-
 // To do: add a header
 
 // CTR_NATIVE only adds an ST1 map-metadata null guard below.
@@ -887,8 +876,7 @@ void UI_RenderFrame_Racing()
 	    ((gameMode1 & ROLLING_ITEM) != 0))
 	{
 		// stop weapon shuffle sound
-		Ps2DemoRoulette_StopIfPs2();
-	OtherFX_Stop2(0x5d);
+		OtherFX_Stop2(0x5d);
 
 		// disable the randomizing effect in the HUD
 		gGT->gameMode1 &= ~ROLLING_ITEM;
@@ -1071,7 +1059,6 @@ LAB_800545e8:
 	// if not paused, item stopped rolling, and
 	// weapon roulette sound is playing, then
 	// stop the sound and remove flag
-	Ps2DemoRoulette_StopIfPs2();
 	OtherFX_Stop2(0x5d);
 	GAME_TRACKER->gameMode1 &= ~(ROLLING_ITEM);
 
