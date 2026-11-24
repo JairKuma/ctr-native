@@ -168,7 +168,8 @@ internal void Ps2_WaitAndEmitVBlank(void)
 // (4 VBlanks o mas) y en que se fue el tiempo. Diagnostico (primeros 80).
 extern unsigned long long g_ps2ProfJobCycles;         // native_cd.c
 extern unsigned long long g_ps2ProfJobCallbackCycles; // native_cd.c
-extern u32 g_ps2DebugCornerColor;                      // ps2_renderer.c
+// Cuadrito de diagnostico (lo dibuja ps2_renderer.c al final de cada fotograma).
+u32 g_ps2DebugCornerColor = 0;
 int NativeDiscImage_Ps2JobDebugState(void);           // native_disc_image.c
 void NativeDiscImage_Ps2JobDebugPrint(void);
 

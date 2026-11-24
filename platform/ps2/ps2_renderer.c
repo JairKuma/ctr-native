@@ -1084,9 +1084,30 @@ internal void Ps2Renderer_ClearBorders(void)
 	Ps2Renderer_ApplyScissor();
 }
 
+// Cuadrito de diagnostico en la esquina (PS2 real, sin log): lo pone el
+// vigilante de cargas (ps2_platform.c, donde esta la variable). 0 = no se dibuja.
+extern u32 g_ps2DebugCornerColor;
+
+internal void Ps2Renderer_DrawDebugCorner(void)
+{
+	if (g_ps2DebugCornerColor == 0)
+	{
+		return;
+	}
+	const u32 c = g_ps2DebugCornerColor;
+	s_gs->PrimAlphaEnable = GS_SETTING_OFF;
+	gsKit_set_scissor(s_gs, GS_SCISSOR_RESET);
+	// Borde negro y el color dentro, para que se vea sobre cualquier fondo.
+	gsKit_prim_sprite(s_gs, 20.0f, 20.0f, 68.0f, 68.0f, 0, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));
+	gsKit_prim_sprite(s_gs, 24.0f, 24.0f, 64.0f, 64.0f, 0, GS_SETREG_RGBAQ((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff, 0x80, 0x00));
+	Ps2Renderer_ApplyBlendMode(s_currentBlendMode);
+	Ps2Renderer_ApplyScissor();
+}
+
 void NativeRenderer_SwapWindow(void)
 {
 	Ps2Renderer_ClearBorders();
+	Ps2Renderer_DrawDebugCorner();
 	s_presentedVramThisFrame = 0;
 	const u32 gsStart = Ps2Prof_Now();
 	Ps2Renderer_FlushQueue();
