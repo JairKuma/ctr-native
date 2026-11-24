@@ -140,6 +140,32 @@ void howl_ParseCseqHeader(struct CseqHeader *ch)
 	{
 		sdata->ptrCseqSongData = (char *)(alignedAddr + 2);
 	}
+
+#if defined(CTR_PS2)
+	// Diagnostico (sonido de la ruleta de la demo): como es cada cancion del
+	// paquete de musica de la pista. En la demo, la cancion 3 es la melodia de la
+	// ruleta: 2 pistas, 165 bpm, tpqn 120, 484 bytes.
+	{
+		const u8 *packStart = (const u8 *)ch;
+		const u8 *songData = (const u8 *)sdata->ptrCseqSongData;
+		const u32 packEnd = (u32)ch->songSize;
+		printf("[CTR PS2] musica: paquete con %d canciones (%d instrumentos, %d percusion)\n", (int)ch->numSongs, (int)ch->numLongSamples,
+		       (int)ch->numShortSamples);
+		for (u32 i = 0; i < ch->numSongs; i++)
+		{
+			const u8 *song = songData + sdata->ptrCseqSongStartOffset[i];
+			const u8 *end = (i + 1 < ch->numSongs) ? (songData + sdata->ptrCseqSongStartOffset[i + 1]) : (packStart + packEnd);
+			u32 sum = 0;
+			for (const u8 *b = song; b < end; b++)
+			{
+				sum += *b;
+			}
+			const struct CseqSongHeader *sh = (const struct CseqSongHeader *)song;
+			printf("[CTR PS2] musica: cancion %u: pistas %d | bpm %d | tpqn %d | %d bytes | suma %u\n", (unsigned)i, (int)sh->numSeqs, (int)sh->bpm, (int)sh->tpqn,
+			       (int)(end - song), (unsigned)sum);
+		}
+	}
+#endif
 }
 
 int howl_LoadHeader(char *filename)
