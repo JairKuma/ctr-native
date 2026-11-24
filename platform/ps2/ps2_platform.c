@@ -164,12 +164,55 @@ internal void Ps2_WaitAndEmitVBlank(void)
 	Ps2_EmitVBlank();
 }
 
+// Medidor de las cargas: durante el LOADING apunta los fotogramas lentos
+// (4 VBlanks o mas) y en que se fue el tiempo. Diagnostico (primeros 80).
+extern unsigned long long g_ps2ProfJobCycles;         // native_cd.c
+extern unsigned long long g_ps2ProfJobCallbackCycles; // native_cd.c
+
+internal u32 Ps2_ProfDeltaMs(unsigned long long now, unsigned long long *last)
+{
+	// Los contadores del medidor se ponen a 0 cada ~5 s (ps2_audio_out.c).
+	const unsigned long long delta = (now >= *last) ? (now - *last) : now;
+	*last = now;
+	return (u32)(delta / 294912ull);
+}
+
+internal void Ps2_ReportSlowLoadFrame(void)
+{
+	static u32 lastHw = 0;
+	static u32 reported = 0;
+	static unsigned long long lastCd = 0;
+	static unsigned long long lastGs = 0;
+	static unsigned long long lastAudio = 0;
+	static unsigned long long lastJob = 0;
+	static unsigned long long lastCb = 0;
+	const u32 hw = s_hwVBlankCount;
+	const u32 frame = hw - lastHw;
+	const u32 cdMs = Ps2_ProfDeltaMs(g_ps2ProfCdCycles, &lastCd);
+	const u32 gsMs = Ps2_ProfDeltaMs(g_ps2ProfGsCycles, &lastGs);
+	const u32 audioMs = Ps2_ProfDeltaMs(g_ps2ProfAudioCycles, &lastAudio);
+	const u32 jobMs = Ps2_ProfDeltaMs(g_ps2ProfJobCycles, &lastJob);
+	const u32 cbMs = Ps2_ProfDeltaMs(g_ps2ProfJobCallbackCycles, &lastCb);
+	if ((lastHw != 0) && (frame >= 4) && (reported < 80) && (sdata->Loading.stage != LOAD_IDLE))
+	{
+		reported++;
+		const u32 frameMs = frame * 1000u / 60u;
+		const u32 known = cdMs + gsMs + audioMs + jobMs + cbMs;
+		printf("[CTR PS2] fotograma lento en carga: %u ms | etapa %d | esperando lector %u | gs %u | audio %u | copia carga %u | callbacks %u | resto (juego) %u\n",
+		       (unsigned)frameMs, (int)sdata->Loading.stage, (unsigned)cdMs, (unsigned)gsMs, (unsigned)audioMs, (unsigned)jobMs, (unsigned)cbMs,
+		       (unsigned)((frameMs > known) ? (frameMs - known) : 0u));
+	}
+	lastHw = hw;
+}
+
 int VSync(int mode)
 {
 	if (mode < 0)
 	{
 		return s_nativeVBlankCount;
 	}
+
+	Ps2_ReportSlowLoadFrame();
 
 	const int requestedVBlanks = (mode == 0) ? 1 : mode;
 
