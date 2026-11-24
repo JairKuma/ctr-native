@@ -174,6 +174,38 @@ internal u16 NativeSTR_NegateMdecCode(u16 code)
 	return (u16)((code & 0xfc00) | ((u32)-NativeSTR_Sign10(code) & 0x3ff));
 }
 
+#if defined(CTR_PS2)
+// PS2: lectura de bits rapida (antes, un bit por vuelta). Mismo resultado: las
+// palabras de 16 bits fuera del final se leen como 0, igual que el original.
+internal u32 NativeSTR_Word16(const struct NativeSTRBitReader *br, s32 wordIndex)
+{
+	const s32 byteOffset = wordIndex * 2;
+	return (byteOffset + 1 < br->size) ? (u32)NativeSTR_ReadLE16(&br->data[byteOffset]) : 0u;
+}
+
+internal u32 NativeSTR_PeekBits(struct NativeSTRBitReader *br, s32 count)
+{
+	if (count <= 0)
+	{
+		return 0;
+	}
+	const s32 w = br->bitOffset >> 4;
+	const s32 sh = br->bitOffset & 15;
+	u32 v = (NativeSTR_Word16(br, w) << 16) | NativeSTR_Word16(br, w + 1);
+	if (sh != 0)
+	{
+		v = (v << sh) | (NativeSTR_Word16(br, w + 2) >> (16 - sh));
+	}
+	return (count >= 32) ? v : (v >> (32 - count));
+}
+
+internal u32 NativeSTR_ReadBits(struct NativeSTRBitReader *br, s32 count)
+{
+	const u32 v = NativeSTR_PeekBits(br, count);
+	br->bitOffset += (count > 0) ? count : 0;
+	return v;
+}
+#else
 internal u32 NativeSTR_ReadBits(struct NativeSTRBitReader *br, s32 count)
 {
 	u32 value = 0;
@@ -204,9 +236,53 @@ internal u32 NativeSTR_PeekBits(struct NativeSTRBitReader *br, s32 count)
 	br->bitOffset = oldBitOffset;
 	return value;
 }
+#endif
 
 internal s32 NativeSTR_ReadAcCode(struct NativeSTRBitReader *br, u16 *outCode)
 {
+#if defined(CTR_PS2)
+	// PS2: se miran los 16 bits siguientes una sola vez (antes, una lectura por
+	// cada grupo probado). Mismo orden de comprobaciones y mismo resultado.
+	const u32 next16 = NativeSTR_PeekBits(br, 16);
+	if ((next16 >> 10) == 0x1)
+	{
+		br->bitOffset += 6;
+		*outCode = (u16)NativeSTR_ReadBits(br, 16);
+		return 1;
+	}
+	if ((next16 >> 4) == 0)
+	{
+		br->bitOffset += 12;
+		*outCode = NATIVE_STR_END_OF_BLOCK;
+		return 1;
+	}
+	for (u32 i = 0; i < sizeof(s_acGroups) / sizeof(s_acGroups[0]); i++)
+	{
+		const struct NativeSTRAcGroup *group = &s_acGroups[i];
+		if ((next16 >> (16 - group->prefixBits)) == group->prefix)
+		{
+			u32 index = 0;
+			u32 sign = 0;
+			br->bitOffset += group->prefixBits;
+			if (group->indexBits != 0)
+			{
+				index = NativeSTR_ReadBits(br, group->indexBits);
+			}
+			if (group->values[0] != NATIVE_STR_END_OF_BLOCK)
+			{
+				sign = NativeSTR_ReadBits(br, 1);
+			}
+			if (index >= group->valueCount)
+			{
+				return 0;
+			}
+			u16 code = group->values[index];
+			*outCode = (sign != 0) ? NativeSTR_NegateMdecCode(code) : code;
+			return 1;
+		}
+	}
+	return 0;
+#endif
 	if (NativeSTR_PeekBits(br, 6) == 0x1)
 	{
 		NativeSTR_ReadBits(br, 6);
@@ -258,6 +334,83 @@ internal s32 NativeSTR_ReadAcCode(struct NativeSTRBitReader *br, u16 *outCode)
 // NOTE(aalhendi): Separable IDCT, kept bit-identical to the old direct 2D sum by
 // preserving unrounded s64 row transforms and applying the same final rounding.
 // Zero coefficient rows are skipped before the column pass.
+#if defined(CTR_PS2)
+// PS2: IDCT en coma flotante simple (la EE no tiene multiplicacion ni division
+// de 64 bits: el original llamaba a funciones lentas ~20000 veces por fotograma).
+// Mismas formulas y mismo redondeo final; puede variar 1 en algun pixel.
+global_variable float s_idctBasisF[8][8];
+global_variable int s_idctBasisReady = 0;
+
+internal void NativeSTR_IDCT(const s32 *coefficients, s32 *out)
+{
+	float rowPass[64];
+	s32 nonZeroRows[8];
+	s32 rowCount = 0;
+
+	if (!s_idctBasisReady)
+	{
+		for (s32 a = 0; a < 8; a++)
+		{
+			for (s32 b = 0; b < 8; b++)
+			{
+				// basis / 2^14; el producto de dos queda dividido entre 2^28 y
+				// el original divide entre 2^30 (x4): se aplica al final.
+				s_idctBasisF[a][b] = (float)s_idctBasis[a][b] * (1.0f / 16384.0f);
+			}
+		}
+		s_idctBasisReady = 1;
+	}
+
+	for (s32 v = 0; v < 8; v++)
+	{
+		const s32 *row = &coefficients[v * 8];
+		s32 lastNonZero = -1;
+		for (s32 u = 0; u < 8; u++)
+		{
+			if (row[u] != 0)
+			{
+				lastNonZero = u;
+			}
+		}
+		if (lastNonZero < 0)
+		{
+			continue;
+		}
+		nonZeroRows[rowCount++] = v;
+		for (s32 x = 0; x < 8; x++)
+		{
+			float sum = 0.0f;
+			for (s32 u = 0; u <= lastNonZero; u++)
+			{
+				sum += s_idctBasisF[x][u] * (float)row[u];
+			}
+			rowPass[v * 8 + x] = sum;
+		}
+	}
+
+	if (rowCount == 0)
+	{
+		memset(out, 0, 64 * sizeof(s32));
+		return;
+	}
+
+	for (s32 y = 0; y < 8; y++)
+	{
+		for (s32 x = 0; x < 8; x++)
+		{
+			float sum = 0.0f;
+			for (s32 i = 0; i < rowCount; i++)
+			{
+				const s32 v = nonZeroRows[i];
+				sum += s_idctBasisF[y][v] * rowPass[v * 8 + x];
+			}
+			sum *= 0.25f;
+			// Redondeo como el original: la mitad se aleja de cero.
+			out[y * 8 + x] = (sum >= 0.0f) ? (s32)(sum + 0.5f) : -(s32)(0.5f - sum);
+		}
+	}
+}
+#else
 internal void NativeSTR_IDCT(const s32 *coefficients, s32 *out)
 {
 	s64 rowPass[64];
@@ -325,6 +478,7 @@ internal void NativeSTR_IDCT(const s32 *coefficients, s32 *out)
 		}
 	}
 }
+#endif
 
 internal s32 NativeSTR_DecodeBlock(struct NativeSTRBitReader *br, s32 quant, s32 *out)
 {
@@ -809,10 +963,43 @@ s32 NativeSTR_UploadNextFrame(s32 dstX, s32 dstY)
 		return 0;
 	}
 
+#if defined(CTR_PS2)
+	// Medidor: tiempo de leer + descomprimir cada fotograma del video (log cada
+	// 60 fotogramas).
+	static u32 s_strStatFrames = 0;
+	static u32 s_strStatReadCycles = 0;
+	static u32 s_strStatDecodeCycles = 0;
+	u32 t0;
+	u32 t1;
+	u32 t2;
+	__asm__ volatile("mfc0 %0, $9" : "=r"(t0));
+	const s32 readOk = NativeSTR_ReadNextFrame();
+	__asm__ volatile("mfc0 %0, $9" : "=r"(t1));
+	const s32 decodeOk = readOk && NativeSTR_DecodeFrame();
+	__asm__ volatile("mfc0 %0, $9" : "=r"(t2));
+	s_strStatReadCycles += t1 - t0;
+	s_strStatDecodeCycles += t2 - t1;
+	if (++s_strStatFrames >= 60)
+	{
+		// Count va a 294,912 MHz: ciclos / 294912 = ms.
+		printf("[CTR PS2] video: %u fotogramas | leer %u.%u ms/fotograma | descomprimir %u.%u ms/fotograma (%dx%d)\n", (unsigned)s_strStatFrames,
+		       (unsigned)(s_strStatReadCycles / s_strStatFrames / 294912u), (unsigned)((s_strStatReadCycles / s_strStatFrames / 29491u) % 10u),
+		       (unsigned)(s_strStatDecodeCycles / s_strStatFrames / 294912u), (unsigned)((s_strStatDecodeCycles / s_strStatFrames / 29491u) % 10u),
+		       (int)s_str.width, (int)s_str.height);
+		s_strStatFrames = 0;
+		s_strStatReadCycles = 0;
+		s_strStatDecodeCycles = 0;
+	}
+	if (!readOk || !decodeOk)
+	{
+		return 0;
+	}
+#else
 	if ((NativeSTR_ReadNextFrame() == 0) || (NativeSTR_DecodeFrame() == 0))
 	{
 		return 0;
 	}
+#endif
 
 	rect.x = dstX;
 	rect.y = dstY;

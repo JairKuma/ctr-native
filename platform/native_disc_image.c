@@ -428,6 +428,8 @@ static u32 s_ps2JobStatSectors = 0;
 static u32 s_ps2JobStatBlocks = 0;
 static u32 s_ps2JobStatForced = 0;
 static u32 s_ps2JobLogCount = 0; // las primeras cargas se apuntan en el log
+static u32 s_ps2PrefetchStatRequested = 0;
+static u32 s_ps2PrefetchStatUsed = 0;
 
 // 1 si el sector esta en un hueco de datos del juego (no en el de la XA).
 internal int NativeDiscImage_Ps2GameSlotHas(u32 lba)
@@ -525,9 +527,11 @@ internal int NativeDiscImage_Ps2JobCollect(int wait)
 	return 1;
 }
 
-internal void NativeDiscImage_Ps2JobStop(void)
+internal void NativeDiscImage_Ps2JobStop(int drain)
 {
-	if (s_ps2JobPending)
+	// drain = 1 (error): tirar el bloque pedido. Al acabar bien se deja: puede
+	// ser una lectura anticipada que se recogera en el siguiente VSync.
+	if (drain && s_ps2JobPending)
 	{
 		// No dejar el lector "terminado sin recoger": la XA no podria pedir.
 		Ps2Cd_AsyncWait();
@@ -548,6 +552,16 @@ void NativeDiscImage_Ps2JobDebugPrint(void)
 	       "donde carga %d | donde lector %d | leyendo %d | xa leyendo %d\n",
 	       s_ps2JobActive, (unsigned)s_ps2JobLogCount, (unsigned)s_ps2JobRemaining, (unsigned)s_ps2JobSector, (unsigned)(s_ps2JobFile.lba + s_ps2JobSector),
 	       s_ps2JobPending, (unsigned)s_ps2JobBlockLba, Ps2Cd_AsyncGetState(), s_ps2JobErrors, g_ps2JobWhere, g_ps2CdWhere, g_ps2DiscReadBusy, g_ps2DiscXaRead);
+}
+
+// Desde VSync (native_cd.c) cuando no hay carga: recoger el bloque leido por
+// adelantado si ya llego (asi el lector queda libre para la XA).
+void NativeDiscImage_Ps2PrefetchPoll(void)
+{
+	if (s_ps2JobPending && !s_ps2JobActive && !g_ps2DiscReadBusy && !g_ps2DiscXaRead)
+	{
+		NativeDiscImage_Ps2JobCollect(0);
+	}
 }
 
 // 1 si se puede leer en segundo plano (imagen en el disco de la PS2).
@@ -610,7 +624,7 @@ int NativeDiscImage_Ps2JobStep(int mayBlock)
 				}
 				if ((r < 0) && (s_ps2JobErrors > 3))
 				{
-					NativeDiscImage_Ps2JobStop();
+					NativeDiscImage_Ps2JobStop(1);
 					printf("[CTR PS2] carga en 2o plano: error de lectura en lba %u\n", (unsigned)lba);
 					return -1;
 				}
@@ -632,7 +646,7 @@ int NativeDiscImage_Ps2JobStep(int mayBlock)
 		}
 		if (!NativeDiscImage_ReadDataSector(lba, s_ps2JobDst))
 		{
-			NativeDiscImage_Ps2JobStop();
+			NativeDiscImage_Ps2JobStop(1);
 			printf("[CTR PS2] carga en 2o plano: fallo en lba %u\n", (unsigned)lba);
 			return -1;
 		}
@@ -641,15 +655,16 @@ int NativeDiscImage_Ps2JobStep(int mayBlock)
 		s_ps2JobRemaining--;
 		copied++;
 	}
-	NativeDiscImage_Ps2JobStop();
+	NativeDiscImage_Ps2JobStop(0);
 	if (s_ps2JobLogCount <= 40)
 	{
 		printf("[CTR PS2] carga #%u lista%s\n", (unsigned)s_ps2JobLogCount, mayBlock ? " (forzada)" : "");
 	}
 	if (s_ps2JobStatFiles >= 20)
 	{
-		printf("[CTR PS2] cargas en 2o plano: archivos %u | %u KB | bloques %u | esperas forzadas %u\n", (unsigned)s_ps2JobStatFiles,
-		       (unsigned)(s_ps2JobStatSectors * 2u), (unsigned)s_ps2JobStatBlocks, (unsigned)s_ps2JobStatForced);
+		printf("[CTR PS2] cargas en 2o plano: archivos %u | %u KB | bloques %u | esperas forzadas %u | lectura anticipada %u (recogidas al leer %u)\n",
+		       (unsigned)s_ps2JobStatFiles, (unsigned)(s_ps2JobStatSectors * 2u), (unsigned)s_ps2JobStatBlocks, (unsigned)s_ps2JobStatForced,
+		       (unsigned)s_ps2PrefetchStatRequested, (unsigned)s_ps2PrefetchStatUsed);
 		s_ps2JobStatFiles = 0;
 		s_ps2JobStatSectors = 0;
 		s_ps2JobStatBlocks = 0;
@@ -717,6 +732,18 @@ internal int NativeDiscImage_ReadRawSector(u32 lba, u8 *sector)
 		return 0;
 	}
 
+	// Lectura anticipada: si el sector esta en el bloque que ya se pidio en 2o
+	// plano, se recoge (esperando lo que le quede) en vez de leerlo otra vez.
+	const int ps2GameRead = s_ps2CdDirect && !g_ps2DiscXaRead && !g_ps2DiscReadBusy;
+	if (ps2GameRead && s_ps2JobPending && (lba >= s_ps2JobBlockLba) && (lba < s_ps2JobBlockLba + s_ps2JobBlockSize / NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE) &&
+	    !NativeDiscImage_Ps2GameSlotHas(lba))
+	{
+		if (NativeDiscImage_Ps2JobCollect(1) > 0)
+		{
+			s_ps2PrefetchStatUsed++;
+		}
+	}
+
 	NativeDiscImage_SelectCacheSlot(lba);
 
 	if (s_ps2CdDirect && ((s_nativeDiscImageCacheCount == 0) || (lba < s_nativeDiscImageCacheStart) || (lba >= s_nativeDiscImageCacheStart + s_nativeDiscImageCacheCount)))
@@ -756,6 +783,27 @@ internal int NativeDiscImage_ReadRawSector(u32 lba, u8 *sector)
 	}
 
 	memcpy(sector, &s_nativeDiscImageCache[(lba - s_nativeDiscImageCacheStart) * NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE], NATIVE_DISC_IMAGE_RAW_SECTOR_SIZE);
+
+	// Lectura seguida (videos, archivos grandes) cerca del final del bloque: pedir
+	// ya el siguiente al lector en 2o plano. Asi no hay que esperar ~25 ms cada
+	// 64 sectores (en los videos se notaba como tirones).
+	{
+		static u32 s_ps2LastGameLba = 0xffffffffu;
+		const int sequential = (lba == s_ps2LastGameLba + 1u);
+		if (ps2GameRead)
+		{
+			s_ps2LastGameLba = lba;
+		}
+		const u32 blockEnd = s_nativeDiscImageCacheStart + s_nativeDiscImageCacheCount;
+		if (ps2GameRead && sequential && !s_ps2JobPending && (blockEnd - lba <= 24u) && !NativeDiscImage_Ps2GameSlotHas(blockEnd))
+		{
+			if (NativeDiscImage_Ps2JobRequest(blockEnd) == 1)
+			{
+				s_ps2PrefetchStatRequested++;
+			}
+		}
+	}
+
 	return NativeDiscImage_CheckRawSectorHeader(sector);
 }
 #else

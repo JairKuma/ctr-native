@@ -48,7 +48,18 @@ int boolDecodeXaDuringVsyncCallback;
 int NativeDiscImage_Ps2JobCanStart(void);
 int NativeDiscImage_Ps2JobStart(const struct NativeDiscImageFile *file, u32 sector, u32 sectorCount, void *dst);
 int NativeDiscImage_Ps2JobStep(int mayBlock);
+void NativeDiscImage_Ps2PrefetchPoll(void);
 extern volatile int g_ps2JobWhere;
+// Medidor: tiempo en la carga en 2o plano (copiar/pedir) y en los callbacks
+// del juego al acabar cada archivo (ps2_platform.c lo usa en el LOADING).
+unsigned long long g_ps2ProfJobCycles = 0;
+unsigned long long g_ps2ProfJobCallbackCycles = 0;
+internal u32 NativeCD_Ps2Now(void)
+{
+	u32 count;
+	__asm__ volatile("mfc0 %0, $9" : "=r"(count));
+	return count;
+}
 global_variable int s_ps2CdJobActive = 0;
 global_variable CdlCB s_ps2CdJobCallback = NULL;
 global_variable int s_ps2CdJobInPump = 0;
@@ -60,20 +71,29 @@ internal void NativeCD_Ps2JobDone(int result)
 	s_ps2CdJobCallback = NULL;
 	if (callback != NULL)
 	{
+		const u32 start = NativeCD_Ps2Now();
 		callback((result > 0) ? CdlComplete : CdlDiskError, 0);
+		g_ps2ProfJobCallbackCycles += (u32)(NativeCD_Ps2Now() - start);
 	}
 }
 
 // Avanza la carga en curso sin esperar al lector (ps2_platform.c, en VSync).
 void NativeCD_Ps2Pump(void)
 {
-	if (!s_ps2CdJobActive || s_ps2CdJobInPump)
+	if (s_ps2CdJobInPump)
 	{
+		return;
+	}
+	if (!s_ps2CdJobActive)
+	{
+		NativeDiscImage_Ps2PrefetchPoll(); // lectura anticipada, si la hay
 		return;
 	}
 	s_ps2CdJobInPump = 1;
 	g_ps2JobWhere = 1;
+	const u32 start = NativeCD_Ps2Now();
 	const int result = NativeDiscImage_Ps2JobStep(0);
+	g_ps2ProfJobCycles += (u32)(NativeCD_Ps2Now() - start);
 	g_ps2JobWhere = 0;
 	s_ps2CdJobInPump = 0;
 	// El callback va fuera del cerrojo: si el juego empieza otra lectura desde
