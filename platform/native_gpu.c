@@ -1183,46 +1183,6 @@ internal inline int IsNull(POLY_FT3 *poly)
 	return poly->x0 == -1 && poly->y0 == -1 && poly->x1 == -1 && poly->y1 == -1 && poly->x2 == -1 && poly->y2 == -1;
 }
 
-#ifdef CTR_PS2
-// PS2 (diagnostico): primitivas con textura de 16 bits en la pagina 0x1f (borde
-// de la VRAM). En 2 jugadores salen cientos por fotograma y no deberian existir:
-// se vuelcan las palabras crudas de algunas para ver quien las escribe.
-internal void NativeGpu_Ps2DumpOddPrim(const char *kind, const void *prim, int tpage, int words)
-{
-	// Tres grupos (12 cada uno): 16 bits en la pagina 0x1f (marcador), 16 bits en
-	// cualquier otra pagina, y 4/8 bits en las paginas 0x0e/0x0f (karts lejanos).
-	static int s_dumped[3] = {0, 0, 0};
-	int group;
-	if (GetTPageFormat(tpage) == TF_16_BIT)
-	{
-		group = ((tpage & 0x1f) == 0x1f) ? 0 : 1;
-	}
-	else if ((kind[1] == 'T') && (kind[2] == '3') && (((tpage & 0x1f) == 0x0e) || ((tpage & 0x1f) == 0x0f)))
-	{
-		group = 2;
-	}
-	else
-	{
-		return;
-	}
-	if (s_dumped[group] >= 12)
-	{
-		return;
-	}
-	s_dumped[group]++;
-	const u32 *w = (const u32 *)prim;
-	printf("[CTR PS2] prim rara %s en %08x tpage 0x%04x:", kind, (u32)prim, tpage);
-	for (int i = 0; i < words; i++)
-	{
-		printf(" %08x", w[i]);
-	}
-	printf("\n");
-}
-#define PS2_DUMP_ODD_PRIM(kind, prim, tpage, words) NativeGpu_Ps2DumpOddPrim(kind, prim, tpage, words)
-#else
-#define PS2_DUMP_ODD_PRIM(kind, prim, tpage, words)
-#endif
-
 internal int ProcessFlatLines(P_TAG *polyTag)
 {
 	const bool shadeTexOn = true;
@@ -1431,7 +1391,6 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 	{
 		POLY_FT3 *poly = (POLY_FT3 *)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
-		PS2_DUMP_ODD_PRIM("FT3", poly, poly->tpage, 8);
 
 		// It is an official hack from SCE devs to not use DR_TPAGE and instead use null polygon
 		if (!IsNull(poly))
@@ -1468,7 +1427,6 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 	{
 		POLY_FT4 *poly = (POLY_FT4 *)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
-		PS2_DUMP_ODD_PRIM("FT4", poly, poly->tpage, 10);
 
 		AddSplit(semiTrans, true, NativeGpu_TPageOverlapsActiveDrawPage(poly->tpage));
 
@@ -1515,7 +1473,6 @@ internal int ProcessGouraudPoly(P_TAG *polyTag)
 	{
 		POLY_GT3 *poly = (POLY_GT3 *)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
-		PS2_DUMP_ODD_PRIM("GT3", poly, poly->tpage, 10);
 
 		AddSplit(semiTrans, true, NativeGpu_TPageOverlapsActiveDrawPage(poly->tpage));
 
@@ -1549,7 +1506,6 @@ internal int ProcessGouraudPoly(P_TAG *polyTag)
 	{
 		POLY_GT4 *poly = (POLY_GT4 *)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
-		PS2_DUMP_ODD_PRIM("GT4", poly, poly->tpage, 13);
 
 		AddSplit(semiTrans, true, NativeGpu_TPageOverlapsActiveDrawPage(poly->tpage));
 
