@@ -534,6 +534,19 @@ static void RenderBucket_AdjustDepthBiasForNormal(struct Instance *inst, int pla
 		return;
 	}
 
+#ifdef CTR_PS2
+	// PS2 (prueba): este +10 manda los karts de los OTROS jugadores al fondo de
+	// la lista de dibujo; de lejos el suelo los tapaba (solo se veia su humo).
+	// Se desactiva para comprobarlo.
+	(void)rawView;
+	(void)normalX;
+	(void)normalY;
+	(void)normalZ;
+	(void)normalBias;
+	(void)reflectBias;
+	return;
+#endif
+
 	normalX = (s8)compressed;
 	normalY = (s8)(compressed >> 8);
 	normalZ = (s8)(compressed >> 16);
@@ -1108,16 +1121,6 @@ static struct ModelHeader *RenderBucket_SelectModelHeader(struct Instance *inst,
 	{
 		if (RenderBucket_MipsSub(projectedDistance, (u16)mh->maxDistanceLOD) < 0)
 		{
-#ifdef CTR_PS2
-			// PS2 (prueba): en pantalla partida los LOD _low y _box de los karts
-			// salen invisibles. Se usa siempre el primero (_med) para los karts.
-			if ((lodIndex > 0) && (inst->thread != 0) &&
-			    ((inst->thread->modelIndex == DYNAMIC_PLAYER) || (inst->thread->modelIndex == DYNAMIC_ROBOT_CAR)))
-			{
-				*lodIndexOut = 0;
-				return inst->model->headers;
-			}
-#endif
 			*lodIndexOut = lodIndex;
 			return mh;
 		}
