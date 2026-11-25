@@ -127,6 +127,10 @@ global_variable int s_pageSlotCount = 0;
 global_variable struct Ps2ClutSlot s_clutSlots[PS2_MAX_CLUT_SLOTS];
 global_variable int s_clutSlotCount = 0;
 global_variable struct Ps2Page16Slot s_page16Slot;
+// Hueco pequeno para la pagina de 16 bits del borde derecho (ver Ps2Tex_GetPage16).
+global_variable struct Ps2Page16Slot s_page16Small;
+global_variable int s_page16SmallAvailable = 0;
+global_variable const struct Ps2Page16Slot *s_page16Bound = NULL;
 global_variable int s_page16Available = 0;
 global_variable u32 s_useTick = 1;
 
@@ -756,9 +760,6 @@ internal u32 Ps2Tex_GetClut(u16 clut, TexFormat format, u8 profile)
 // otro pequeno (64 columnas) para la pagina pegada al borde derecho de la VRAM:
 // en 2 jugadores el marcador usa esa pagina y otra a la vez, y con un solo hueco
 // se resubian las dos en cada fotograma.
-global_variable struct Ps2Page16Slot s_page16Small;
-global_variable int s_page16SmallAvailable = 0;
-global_variable const struct Ps2Page16Slot *s_page16Bound = NULL;
 
 internal u32 Ps2Tex_GetPage16(s16 page, u8 profile)
 {
