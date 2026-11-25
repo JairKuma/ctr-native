@@ -99,6 +99,7 @@ struct Ps2Page16Slot
 	u8 profile;
 	u8 valid;
 	int width; // columnas subidas (256, o 64 en la pagina del borde derecho)
+	u32 lastUse;
 };
 
 // Variables globales que la version de PC define en native_renderer.c /
@@ -127,6 +128,10 @@ global_variable int s_pageSlotCount = 0;
 global_variable struct Ps2ClutSlot s_clutSlots[PS2_MAX_CLUT_SLOTS];
 global_variable int s_clutSlotCount = 0;
 global_variable struct Ps2Page16Slot s_page16Slot;
+// Segundo hueco grande: en 2 jugadores el marcador usa dos paginas de 16 bits seguidas.
+global_variable struct Ps2Page16Slot s_page16Slot2;
+global_variable int s_page16Slot2Available = 0;
+global_variable u32 s_page16Tick = 0;
 // Hueco pequeno para la pagina de 16 bits del borde derecho (ver Ps2Tex_GetPage16).
 global_variable struct Ps2Page16Slot s_page16Small;
 global_variable int s_page16SmallAvailable = 0;
@@ -630,6 +635,12 @@ internal void Ps2Tex_InvalidateRect(int x, int y, int w, int h)
 		s_page16Slot.valid = 0;
 		s_stats.p16Invalidated++;
 	}
+	if (s_page16Slot2.valid &&
+	    Ps2Renderer_RectsOverlap(x, y, w, h, Ps2Tex_PageX(s_page16Slot2.page), Ps2Tex_PageY(s_page16Slot2.page), 256, 256))
+	{
+		s_page16Slot2.valid = 0;
+		s_stats.p16Invalidated++;
+	}
 	if (s_page16Small.valid &&
 	    Ps2Renderer_RectsOverlap(x, y, w, h, Ps2Tex_PageX(s_page16Small.page), Ps2Tex_PageY(s_page16Small.page), 64, 256))
 	{
@@ -780,8 +791,38 @@ internal u32 Ps2Tex_GetPage16(s16 page, u8 profile)
 	}
 	width = (width + 63) & ~63;
 
-	struct Ps2Page16Slot *slot = ((width <= 64) && s_page16SmallAvailable) ? &s_page16Small : &s_page16Slot;
+	struct Ps2Page16Slot *slot;
+	s_page16Tick++;
+	if ((width <= 64) && s_page16SmallAvailable)
+	{
+		slot = &s_page16Small;
+	}
+	else if (s_page16Slot2Available)
+	{
+		// Dos huecos grandes: el que ya tenga la pagina, o el usado hace mas tiempo.
+		if (s_page16Slot2.valid && (s_page16Slot2.page == page) && (s_page16Slot2.profile == profile))
+		{
+			slot = &s_page16Slot2;
+		}
+		else if (s_page16Slot.valid && (s_page16Slot.page == page) && (s_page16Slot.profile == profile))
+		{
+			slot = &s_page16Slot;
+		}
+		else if (!s_page16Slot.valid || (s_page16Slot2.valid && (s_page16Slot.lastUse <= s_page16Slot2.lastUse)))
+		{
+			slot = &s_page16Slot;
+		}
+		else
+		{
+			slot = &s_page16Slot2;
+		}
+	}
+	else
+	{
+		slot = &s_page16Slot;
+	}
 	s_page16Bound = slot;
+	slot->lastUse = s_page16Tick;
 
 	if (slot->valid && (slot->page == page) && (slot->profile == profile))
 	{
@@ -969,6 +1010,13 @@ internal void Ps2Tex_AllocatePools(void)
 	s_page16Slot.vram = gsKit_vram_alloc(s_gs, PS2_PAGE16_BYTES, GSKIT_ALLOC_USERBUFFER);
 	s_page16Available = (s_page16Slot.vram != GSKIT_ALLOC_ERROR);
 
+	memset(&s_page16Slot2, 0, sizeof(s_page16Slot2));
+	if (s_page16Available)
+	{
+		s_page16Slot2.vram = gsKit_vram_alloc(s_gs, PS2_PAGE16_BYTES, GSKIT_ALLOC_USERBUFFER);
+		s_page16Slot2Available = (s_page16Slot2.vram != GSKIT_ALLOC_ERROR);
+	}
+
 	// Hueco pequeno: 64x256 CT32 = 64 KB (si no hay sitio se usa el grande).
 	memset(&s_page16Small, 0, sizeof(s_page16Small));
 	if (s_page16Available)
@@ -992,8 +1040,8 @@ internal void Ps2Tex_AllocatePools(void)
 		s_pageSlotCount++;
 	}
 
-	printf("[CTR PS2] Texture cache: %d page slots, %d CLUT slots, 16-bit page slot: %s (+ small: %s)\n", s_pageSlotCount, s_clutSlotCount,
-	       s_page16Available ? "yes" : "no", s_page16SmallAvailable ? "yes" : "no");
+	printf("[CTR PS2] Texture cache: %d page slots, %d CLUT slots, 16-bit page slot: %s (+ 2o: %s, small: %s)\n", s_pageSlotCount, s_clutSlotCount,
+	       s_page16Available ? "yes" : "no", s_page16Slot2Available ? "yes" : "no", s_page16SmallAvailable ? "yes" : "no");
 }
 
 // ---------------------------------------------------------------------------
