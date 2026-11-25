@@ -534,19 +534,6 @@ static void RenderBucket_AdjustDepthBiasForNormal(struct Instance *inst, int pla
 		return;
 	}
 
-#ifdef CTR_PS2
-	// PS2 (prueba): este +10 manda los karts de los OTROS jugadores al fondo de
-	// la lista de dibujo; de lejos el suelo los tapaba (solo se veia su humo).
-	// Se desactiva para comprobarlo.
-	(void)rawView;
-	(void)normalX;
-	(void)normalY;
-	(void)normalZ;
-	(void)normalBias;
-	(void)reflectBias;
-	return;
-#endif
-
 	normalX = (s8)compressed;
 	normalY = (s8)(compressed >> 8);
 	normalZ = (s8)(compressed >> 16);
