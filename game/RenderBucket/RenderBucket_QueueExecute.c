@@ -1122,13 +1122,33 @@ static struct ModelHeader *RenderBucket_SelectModelHeader(struct Instance *inst,
 	}
 
 #ifdef CTR_PS2
-	// PS2: en pantalla partida (2 jugadores, Arcade con bots) los karts lejanos
-	// se quedaban sin ningun LOD y desaparecian (solo se veia su humo). Para los
-	// karts se usa el ultimo LOD (el mas sencillo) en vez de no dibujarlos.
+	// PS2 (diagnostico): en pantalla partida los karts lejanos desaparecen (solo
+	// se ve el humo). Se apuntan una vez los LOD de cada modelo de kart para ver
+	// que distancias trae y cuanto vale la distancia calculada.
 	if ((inst->thread != 0) && ((inst->thread->modelIndex == DYNAMIC_PLAYER) || (inst->thread->modelIndex == DYNAMIC_ROBOT_CAR)))
 	{
-		*lodIndexOut = lodIndex - 1;
-		return mh - 1;
+		static struct Model *s_ps2LoggedModels[16];
+		static int s_ps2LoggedCount = 0;
+		int known = 0;
+		for (int i = 0; i < s_ps2LoggedCount; i++)
+		{
+			if (s_ps2LoggedModels[i] == inst->model)
+			{
+				known = 1;
+				break;
+			}
+		}
+		if (!known && (s_ps2LoggedCount < 16))
+		{
+			s_ps2LoggedModels[s_ps2LoggedCount++] = inst->model;
+			printf("[CTR PS2] kart sin LOD: modelo %.16s | id %d | LODs %d | distancia %d (ancho %d, H %d, prof %d) | limites:", inst->model->name, inst->model->id,
+			       inst->model->numHeaders, projectedDistance, pb->rect.w, pb->distanceToScreen_PREV, viewDepth);
+			for (int i = 0; i < inst->model->numHeaders; i++)
+			{
+				printf(" %.16s=%d", inst->model->headers[i].name, (int)(u16)inst->model->headers[i].maxDistanceLOD);
+			}
+			printf("\n");
+		}
 	}
 #endif
 
