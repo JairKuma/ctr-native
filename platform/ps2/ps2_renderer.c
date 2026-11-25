@@ -54,13 +54,17 @@
 // Cada cuantos triangulos se vacia la cola de gsKit para no desbordarla.
 #define PS2_TRIANGLES_PER_FLUSH 768
 
-// MODO DE PANTALLA. 1 = 240p (512x224 sin entrelazar, como la PS1): cada pixel
-// de PS1 es un pixel en la tele (letras exactas), sin parpadeo del entrelazado,
-// menos memoria del GS y menos pixeles que pintar. 0 = 480i (640x448
-// entrelazado, lo de antes: mas fino en 3D pero parpadea y las letras quedan
-// desiguales por la escala x2,07).
-#ifndef PS2_VIDEO_240P
-#define PS2_VIDEO_240P 1
+// MODO DE PANTALLA (PS2_VIDEO_MODE):
+//   0 = 480i: 640x448 entrelazado (cualquier cable). 3D fino. Las 216 lineas de
+//       CTR se dibujan x2 EXACTO (432 lineas + 8 negras arriba y abajo): letras
+//       iguales. Puede parpadear algo en detalles finos (es el entrelazado).
+//   1 = 240p: 512x224 sin entrelazar, como la PS1. Letras exactas, sin parpadeo,
+//       pero el 3D se ve con la resolucion de la PS1.
+//   2 = 480p: 640x448 progresivo. 3D fino, letras x2 exactas y SIN parpadeo.
+//       SOLO con cable de componentes o adaptador HDMI (con el cable amarillo
+//       normal no hay imagen).
+#ifndef PS2_VIDEO_MODE
+#define PS2_VIDEO_MODE 2
 #endif
 
 // Zona de VRAM que se puede mostrar directamente (PresentVRAMRect).
@@ -351,12 +355,10 @@ internal int Ps2Renderer_RectsOverlap(int ax, int ay, int aw, int ah, int bx, in
 internal void Ps2Renderer_VMap(int srcH, float *scale, float *offset)
 {
 	const int screenH = s_gs->Height;
-	// DESACTIVADO: en la PS2 real (imagen entrelazada en la tele) las letras y
-	// los iconos se veian PEOR con la escala entera. Se vuelve a la escala de
-	// antes (448 / 216). Poner a 1 para probar otra vez.
-	// En 240p (sin entrelazar) se usa la escala ENTERA: 216 lineas de PS1 = 216
-	// lineas en la tele, con 4 de borde arriba y abajo.
-	if ((s_gs->Interlace == GS_NONINTERLACED) && (srcH > 0))
+	// Escala vertical ENTERA siempre que quepa con poco borde: 216 -> 432 (x2)
+	// en 480i/480p, 216 -> 216 (x1) en 240p. Asi todas las filas de PS1 tienen
+	// la misma altura (letras y sombras iguales).
+	if (srcH > 0)
 	{
 		const int k = screenH / srcH;
 		const int border = screenH - k * srcH;
@@ -1044,13 +1046,19 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 	// CTR NTSC-U espera 60 Hz. Con una BIOS PAL gsKit elegiria 50 Hz y el juego
 	// iria un 17% mas lento, asi que forzamos NTSC 640x448 entrelazado.
 	s_gs->Mode = GS_MODE_NTSC;
-#if PS2_VIDEO_240P
-	// 240p: 512 de ancho (igual que CTR, escala horizontal x1) y 224 lineas
-	// sin entrelazar (CTR usa 216; quedan 4 lineas negras arriba y abajo).
+#if PS2_VIDEO_MODE == 1
+	// 240p: 512 de ancho (igual que CTR) y 224 lineas sin entrelazar.
 	s_gs->Interlace = GS_NONINTERLACED;
 	s_gs->Field = GS_FRAME;
 	s_gs->Width = 512;
 	s_gs->Height = 224;
+#elif PS2_VIDEO_MODE == 2
+	// 480p progresivo (componentes / HDMI).
+	s_gs->Mode = GS_MODE_DTV_480P;
+	s_gs->Interlace = GS_NONINTERLACED;
+	s_gs->Field = GS_FRAME;
+	s_gs->Width = 640;
+	s_gs->Height = 448;
 #else
 	s_gs->Interlace = GS_INTERLACED;
 	s_gs->Field = GS_FIELD;
