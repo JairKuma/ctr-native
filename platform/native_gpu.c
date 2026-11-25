@@ -1189,12 +1189,27 @@ internal inline int IsNull(POLY_FT3 *poly)
 // se vuelcan las palabras crudas de algunas para ver quien las escribe.
 internal void NativeGpu_Ps2DumpOddPrim(const char *kind, const void *prim, int tpage, int words)
 {
-	static int s_dumped = 0;
-	if ((GetTPageFormat(tpage) != TF_16_BIT) || ((tpage & 0x1f) != 0x1f) || (s_dumped >= 12))
+	// Tres grupos (12 cada uno): 16 bits en la pagina 0x1f (marcador), 16 bits en
+	// cualquier otra pagina, y 4/8 bits en las paginas 0x0e/0x0f (karts lejanos).
+	static int s_dumped[3] = {0, 0, 0};
+	int group;
+	if (GetTPageFormat(tpage) == TF_16_BIT)
+	{
+		group = ((tpage & 0x1f) == 0x1f) ? 0 : 1;
+	}
+	else if (((tpage & 0x1f) == 0x0e) || ((tpage & 0x1f) == 0x0f))
+	{
+		group = 2;
+	}
+	else
 	{
 		return;
 	}
-	s_dumped++;
+	if (s_dumped[group] >= 12)
+	{
+		return;
+	}
+	s_dumped[group]++;
 	const u32 *w = (const u32 *)prim;
 	printf("[CTR PS2] prim rara %s en %08x tpage 0x%04x:", kind, (u32)prim, tpage);
 	for (int i = 0; i < words; i++)
