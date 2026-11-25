@@ -13,6 +13,31 @@ void DecalMP_01(struct GameTracker *unusedGameTracker)
 	struct PushBuffer *pb = GAME_TRACKER->pushBuffer;
 	s32 cameraID;
 	(void)unusedGameTracker;
+#ifdef CTR_PS2
+	// PS2: en pantalla partida la PS1 no dibuja los karts lejanos de los otros
+	// jugadores en 3D: los pinta en una imagen pequena fuera de pantalla (VRAM
+	// x>=0x200) y luego pega esa imagen como un cuadro (DecalMP_03). El renderer
+	// de PS2 no dibuja fuera de pantalla, asi que el cuadro salia vacio y el kart
+	// era invisible (salvo cuando el angulo de la camara lo sacaba de ese modo).
+	// Aqui se dibujan siempre en 3D: sin PUSHBUFFER_EXISTS ni cambio de
+	// pushbuffer. Se deja PIXEL_LOD (de lejos se agrandan, como en PS1).
+	(void)entry;
+	(void)pb;
+	(void)cameraID;
+	{
+		s32 driverID;
+		for (driverID = 0; driverID < 8; driverID++)
+		{
+			struct Driver *driver = GAME_TRACKER->drivers[driverID];
+			if ((driver == NULL) || (driver->instSelf == NULL))
+			{
+				continue;
+			}
+			driver->instSelf->flags = (driver->instSelf->flags & ~PUSHBUFFER_EXISTS) | PIXEL_LOD;
+		}
+	}
+	return;
+#endif
 	for (cameraID = 0; cameraID < GAME_TRACKER->numPlyrCurrGame; cameraID++, pb++)
 	{
 		s32 driverID;
