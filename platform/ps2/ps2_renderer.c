@@ -268,8 +268,6 @@ struct Ps2Stats
 	int p16MinU, p16MaxU, p16MinV, p16MaxV; // texeles usados (primer vertice)
 	int p16MinX, p16MaxX, p16MinY, p16MaxY; // posicion en pantalla (primer vertice)
 	int p16Clut, p16Page;
-	u32 p16ProfileMiss; // resubidas por cambio de perfil de alfa (misma pagina)
-	u32 p16Invalidated; // la pagina se borro porque el juego escribio en esa zona
 };
 
 global_variable struct Ps2Stats s_stats;
@@ -565,37 +563,8 @@ internal u32 Ps2Tex_ConvertColor(u16 c, enum Ps2AlphaMask mask, u8 factor)
 	return r | (g << 8) | (b << 16) | (a << 24);
 }
 
-// PS2 (diagnostico 2 jugadores): las texturas de los karts lejanos (_low/_box)
-// estan en la VRAM de PS1 en x 896-1023, y 0-255. Se apuntan las escrituras en
-// esa zona para ver si se cargan y si algo las pisa despues.
-global_variable int s_ps2KartVramLogs = 0;
-internal void Ps2Tex_InvalidateRect(int x, int y, int w, int h);
-internal void Ps2Tex_LogKartVramWrite(const char *who, int x, int y, int w, int h)
-{
-	if ((s_ps2KartVramLogs < 40) && (Ps2Renderer_RectsOverlap(x, y, w, h, 896, 0, 128, 256) || Ps2Renderer_RectsOverlap(x, y, w, h, 0, 250, 1024, 16)))
-	{
-		s_ps2KartVramLogs++;
-		printf("[CTR PS2] VRAM karts lejanos: %s x %d y %d %dx%d\n", who, x, y, w, h);
-	}
-}
-
-internal int Ps2Tex_CountNonZero(int x, int y, int w, int h)
-{
-	int n = 0;
-	for (int row = y; row < y + h; row++)
-	{
-		const u16 *p = &s_vramPixels[row * VRAM_WIDTH + x];
-		for (int col = 0; col < w; col++)
-		{
-			n += (p[col] != 0);
-		}
-	}
-	return n;
-}
-
 internal void Ps2Tex_InvalidateRect(int x, int y, int w, int h)
 {
-	Ps2Tex_LogKartVramWrite("escritura", x, y, w, h);
 	s_lastBindValid = 0;
 
 	// Si el juego escribe desde la CPU encima de una zona que tenia el contenido
@@ -633,19 +602,16 @@ internal void Ps2Tex_InvalidateRect(int x, int y, int w, int h)
 	    Ps2Renderer_RectsOverlap(x, y, w, h, Ps2Tex_PageX(s_page16Slot.page), Ps2Tex_PageY(s_page16Slot.page), 256, 256))
 	{
 		s_page16Slot.valid = 0;
-		s_stats.p16Invalidated++;
 	}
 	if (s_page16Slot2.valid &&
 	    Ps2Renderer_RectsOverlap(x, y, w, h, Ps2Tex_PageX(s_page16Slot2.page), Ps2Tex_PageY(s_page16Slot2.page), 256, 256))
 	{
 		s_page16Slot2.valid = 0;
-		s_stats.p16Invalidated++;
 	}
 	if (s_page16Small.valid &&
 	    Ps2Renderer_RectsOverlap(x, y, w, h, Ps2Tex_PageX(s_page16Small.page), Ps2Tex_PageY(s_page16Small.page), 64, 256))
 	{
 		s_page16Small.valid = 0;
-		s_stats.p16Invalidated++;
 	}
 }
 
@@ -827,10 +793,6 @@ internal u32 Ps2Tex_GetPage16(s16 page, u8 profile)
 	if (slot->valid && (slot->page == page) && (slot->profile == profile))
 	{
 		return slot->vram;
-	}
-	if (slot->valid && (slot->page == page))
-	{
-		s_stats.p16ProfileMiss++;
 	}
 
 	enum Ps2AlphaMask mask;
@@ -1224,18 +1186,6 @@ internal void Ps2Renderer_UpdateStats(void)
 		}
 	}
 	printf(" | ultima copia %u,%u %ux%u | pasadas saltadas %u\n", s_fbLastSnapX, s_fbLastSnapY, s_fbLastSnapW, s_fbLastSnapH, s_stats.surfacePass2Skips);
-	printf("[CTR PS2] VRAM karts lejanos: pixeles no vacios x896-959 %d de 16384 | x960-1023 %d de 16384\n", Ps2Tex_CountNonZero(896, 0, 64, 256),
-	       Ps2Tex_CountNonZero(960, 0, 64, 256));
-	// Paletas (16 colores) de los karts: _box/_low (invisibles) y _med (se ve).
-	printf("[CTR PS2] paletas karts (colores no vacios de 16): box 384,263=%d 320,257=%d 496,261=%d | low 160,255=%d 432,258=%d 384,262=%d | med 480,259=%d 976,253=%d\n",
-	       Ps2Tex_CountNonZero(384, 263, 16, 1), Ps2Tex_CountNonZero(320, 257, 16, 1), Ps2Tex_CountNonZero(496, 261, 16, 1), Ps2Tex_CountNonZero(160, 255, 16, 1),
-	       Ps2Tex_CountNonZero(432, 258, 16, 1), Ps2Tex_CountNonZero(384, 262, 16, 1), Ps2Tex_CountNonZero(480, 259, 16, 1), Ps2Tex_CountNonZero(976, 253, 16, 1));
-	if (s_stats.p16Fallback > 0)
-	{
-		printf("[CTR PS2] 16 bits: page 0x%04x clut 0x%04x | u %d-%d v %d-%d | pantalla x %d-%d y %d-%d | resubidas por perfil %u, por escritura %u\n", s_stats.p16Page,
-		       s_stats.p16Clut, s_stats.p16MinU, s_stats.p16MaxU, s_stats.p16MinV, s_stats.p16MaxV, s_stats.p16MinX, s_stats.p16MaxX, s_stats.p16MinY, s_stats.p16MaxY,
-		       s_stats.p16ProfileMiss, s_stats.p16Invalidated);
-	}
 
 	memset(&s_stats, 0, sizeof(s_stats));
 	s_fbSnapshots = 0;
