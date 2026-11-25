@@ -556,8 +556,37 @@ internal u32 Ps2Tex_ConvertColor(u16 c, enum Ps2AlphaMask mask, u8 factor)
 	return r | (g << 8) | (b << 16) | (a << 24);
 }
 
+// PS2 (diagnostico 2 jugadores): las texturas de los karts lejanos (_low/_box)
+// estan en la VRAM de PS1 en x 896-1023, y 0-255. Se apuntan las escrituras en
+// esa zona para ver si se cargan y si algo las pisa despues.
+global_variable int s_ps2KartVramLogs = 0;
+internal void Ps2Tex_InvalidateRect(int x, int y, int w, int h);
+internal void Ps2Tex_LogKartVramWrite(const char *who, int x, int y, int w, int h)
+{
+	if ((s_ps2KartVramLogs < 40) && Ps2Renderer_RectsOverlap(x, y, w, h, 896, 0, 128, 256))
+	{
+		s_ps2KartVramLogs++;
+		printf("[CTR PS2] VRAM karts lejanos: %s x %d y %d %dx%d\n", who, x, y, w, h);
+	}
+}
+
+internal int Ps2Tex_CountNonZero(int x, int y, int w, int h)
+{
+	int n = 0;
+	for (int row = y; row < y + h; row++)
+	{
+		const u16 *p = &s_vramPixels[row * VRAM_WIDTH + x];
+		for (int col = 0; col < w; col++)
+		{
+			n += (p[col] != 0);
+		}
+	}
+	return n;
+}
+
 internal void Ps2Tex_InvalidateRect(int x, int y, int w, int h)
 {
+	Ps2Tex_LogKartVramWrite("escritura", x, y, w, h);
 	s_lastBindValid = 0;
 
 	// Si el juego escribe desde la CPU encima de una zona que tenia el contenido
@@ -595,6 +624,12 @@ internal void Ps2Tex_InvalidateRect(int x, int y, int w, int h)
 	    Ps2Renderer_RectsOverlap(x, y, w, h, Ps2Tex_PageX(s_page16Slot.page), Ps2Tex_PageY(s_page16Slot.page), 256, 256))
 	{
 		s_page16Slot.valid = 0;
+		s_stats.p16Invalidated++;
+	}
+	if (s_page16Small.valid &&
+	    Ps2Renderer_RectsOverlap(x, y, w, h, Ps2Tex_PageX(s_page16Small.page), Ps2Tex_PageY(s_page16Small.page), 64, 256))
+	{
+		s_page16Small.valid = 0;
 		s_stats.p16Invalidated++;
 	}
 }
@@ -717,7 +752,14 @@ internal u32 Ps2Tex_GetClut(u16 clut, TexFormat format, u8 profile)
 	return victim->vram;
 }
 
-// Pagina de 16 bits convertida a CT32 (un unico hueco: en CTR son raras).
+// Pagina de 16 bits convertida a CT32. Hay un hueco grande (256 columnas) y
+// otro pequeno (64 columnas) para la pagina pegada al borde derecho de la VRAM:
+// en 2 jugadores el marcador usa esa pagina y otra a la vez, y con un solo hueco
+// se resubian las dos en cada fotograma.
+global_variable struct Ps2Page16Slot s_page16Small;
+global_variable int s_page16SmallAvailable = 0;
+global_variable const struct Ps2Page16Slot *s_page16Bound = NULL;
+
 internal u32 Ps2Tex_GetPage16(s16 page, u8 profile)
 {
 	if (!s_page16Available)
@@ -725,11 +767,26 @@ internal u32 Ps2Tex_GetPage16(s16 page, u8 profile)
 		return 0;
 	}
 
-	if (s_page16Slot.valid && (s_page16Slot.page == page) && (s_page16Slot.profile == profile))
+	const int pageX = Ps2Tex_PageX(page);
+	const int pageY = Ps2Tex_PageY(page);
+
+	// Las paginas pegadas al borde derecho de la VRAM (x = 768 o 960) solo tienen
+	// 256 o 64 columnas validas: se convierte y se sube solo esa parte.
+	int width = VRAM_WIDTH - pageX;
+	if (width > 256)
 	{
-		return s_page16Slot.vram;
+		width = 256;
 	}
-	if (s_page16Slot.valid && (s_page16Slot.page == page))
+	width = (width + 63) & ~63;
+
+	struct Ps2Page16Slot *slot = ((width <= 64) && s_page16SmallAvailable) ? &s_page16Small : &s_page16Slot;
+	s_page16Bound = slot;
+
+	if (slot->valid && (slot->page == page) && (slot->profile == profile))
+	{
+		return slot->vram;
+	}
+	if (slot->valid && (slot->page == page))
 	{
 		s_stats.p16ProfileMiss++;
 	}
@@ -737,19 +794,6 @@ internal u32 Ps2Tex_GetPage16(s16 page, u8 profile)
 	enum Ps2AlphaMask mask;
 	u8 factor;
 	Ps2Tex_ProfileDecode(profile, &mask, &factor);
-
-	const int pageX = Ps2Tex_PageX(page);
-	const int pageY = Ps2Tex_PageY(page);
-
-	// Las paginas pegadas al borde derecho de la VRAM (x = 768 o 960) solo tienen
-	// 256 o 64 columnas validas: se convierte y se sube solo esa parte (en 2
-	// jugadores el juego usa mucho la pagina de x = 960 y esto costaba ~4 veces mas).
-	int width = VRAM_WIDTH - pageX;
-	if (width > 256)
-	{
-		width = 256;
-	}
-	width = (width + 63) & ~63;
 
 	for (int row = 0; row < 256; row++)
 	{
@@ -762,14 +806,14 @@ internal u32 Ps2Tex_GetPage16(s16 page, u8 profile)
 		}
 	}
 
-	Ps2Renderer_SendToGS(s_page16Upload, width, 256, s_page16Slot.vram, GS_PSM_CT32, (u32)(width / 64), GS_CLUT_NONE);
-	s_page16Slot.width = width;
+	Ps2Renderer_SendToGS(s_page16Upload, width, 256, slot->vram, GS_PSM_CT32, (u32)(width / 64), GS_CLUT_NONE);
+	slot->width = width;
 	s_stats.page16Uploads++;
 
-	s_page16Slot.page = page;
-	s_page16Slot.profile = profile;
-	s_page16Slot.valid = 1;
-	return s_page16Slot.vram;
+	slot->page = page;
+	slot->profile = profile;
+	slot->valid = 1;
+	return slot->vram;
 }
 
 internal const struct Ps2FbSurface *Ps2Tex_FindSurface(s16 page)
@@ -895,8 +939,8 @@ internal int Ps2Tex_BindSlow(const GrVertex *v, GSTEXTURE *tex, u8 profile)
 
 		tex->PSM = GS_PSM_CT32;
 		tex->Vram = pageVram;
-		tex->Width = (u32)s_page16Slot.width;
-		tex->TBW = (u8)(s_page16Slot.width / 64);
+		tex->Width = (u32)s_page16Bound->width;
+		tex->TBW = (u8)(s_page16Bound->width / 64);
 		return 1;
 	}
 
@@ -924,6 +968,14 @@ internal void Ps2Tex_AllocatePools(void)
 	s_page16Slot.vram = gsKit_vram_alloc(s_gs, PS2_PAGE16_BYTES, GSKIT_ALLOC_USERBUFFER);
 	s_page16Available = (s_page16Slot.vram != GSKIT_ALLOC_ERROR);
 
+	// Hueco pequeno: 64x256 CT32 = 64 KB (si no hay sitio se usa el grande).
+	memset(&s_page16Small, 0, sizeof(s_page16Small));
+	if (s_page16Available)
+	{
+		s_page16Small.vram = gsKit_vram_alloc(s_gs, 64 * 256 * 4, GSKIT_ALLOC_USERBUFFER);
+		s_page16SmallAvailable = (s_page16Small.vram != GSKIT_ALLOC_ERROR);
+	}
+
 	// Paginas de 4/8 bits: todos los huecos que quepan en lo que queda.
 	s_pageSlotCount = 0;
 	while (s_pageSlotCount < PS2_MAX_PAGE_SLOTS)
@@ -939,8 +991,8 @@ internal void Ps2Tex_AllocatePools(void)
 		s_pageSlotCount++;
 	}
 
-	printf("[CTR PS2] Texture cache: %d page slots, %d CLUT slots, 16-bit page slot: %s\n", s_pageSlotCount, s_clutSlotCount,
-	       s_page16Available ? "yes" : "no");
+	printf("[CTR PS2] Texture cache: %d page slots, %d CLUT slots, 16-bit page slot: %s (+ small: %s)\n", s_pageSlotCount, s_clutSlotCount,
+	       s_page16Available ? "yes" : "no", s_page16SmallAvailable ? "yes" : "no");
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,6 +1175,8 @@ internal void Ps2Renderer_UpdateStats(void)
 		}
 	}
 	printf(" | ultima copia %u,%u %ux%u | pasadas saltadas %u\n", s_fbLastSnapX, s_fbLastSnapY, s_fbLastSnapW, s_fbLastSnapH, s_stats.surfacePass2Skips);
+	printf("[CTR PS2] VRAM karts lejanos: pixeles no vacios x896-959 %d de 16384 | x960-1023 %d de 16384\n", Ps2Tex_CountNonZero(896, 0, 64, 256),
+	       Ps2Tex_CountNonZero(960, 0, 64, 256));
 	if (s_stats.p16Fallback > 0)
 	{
 		printf("[CTR PS2] 16 bits: page 0x%04x clut 0x%04x | u %d-%d v %d-%d | pantalla x %d-%d y %d-%d | resubidas por perfil %u, por escritura %u\n", s_stats.p16Page,
