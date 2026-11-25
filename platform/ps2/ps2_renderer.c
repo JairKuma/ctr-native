@@ -572,7 +572,7 @@ global_variable int s_ps2KartVramLogs = 0;
 internal void Ps2Tex_InvalidateRect(int x, int y, int w, int h);
 internal void Ps2Tex_LogKartVramWrite(const char *who, int x, int y, int w, int h)
 {
-	if ((s_ps2KartVramLogs < 40) && Ps2Renderer_RectsOverlap(x, y, w, h, 896, 0, 128, 256))
+	if ((s_ps2KartVramLogs < 40) && (Ps2Renderer_RectsOverlap(x, y, w, h, 896, 0, 128, 256) || Ps2Renderer_RectsOverlap(x, y, w, h, 0, 250, 1024, 16)))
 	{
 		s_ps2KartVramLogs++;
 		printf("[CTR PS2] VRAM karts lejanos: %s x %d y %d %dx%d\n", who, x, y, w, h);
@@ -1226,6 +1226,10 @@ internal void Ps2Renderer_UpdateStats(void)
 	printf(" | ultima copia %u,%u %ux%u | pasadas saltadas %u\n", s_fbLastSnapX, s_fbLastSnapY, s_fbLastSnapW, s_fbLastSnapH, s_stats.surfacePass2Skips);
 	printf("[CTR PS2] VRAM karts lejanos: pixeles no vacios x896-959 %d de 16384 | x960-1023 %d de 16384\n", Ps2Tex_CountNonZero(896, 0, 64, 256),
 	       Ps2Tex_CountNonZero(960, 0, 64, 256));
+	// Paletas (16 colores) de los karts: _box/_low (invisibles) y _med (se ve).
+	printf("[CTR PS2] paletas karts (colores no vacios de 16): box 384,263=%d 320,257=%d 496,261=%d | low 160,255=%d 432,258=%d 384,262=%d | med 480,259=%d 976,253=%d\n",
+	       Ps2Tex_CountNonZero(384, 263, 16, 1), Ps2Tex_CountNonZero(320, 257, 16, 1), Ps2Tex_CountNonZero(496, 261, 16, 1), Ps2Tex_CountNonZero(160, 255, 16, 1),
+	       Ps2Tex_CountNonZero(432, 258, 16, 1), Ps2Tex_CountNonZero(384, 262, 16, 1), Ps2Tex_CountNonZero(480, 259, 16, 1), Ps2Tex_CountNonZero(976, 253, 16, 1));
 	if (s_stats.p16Fallback > 0)
 	{
 		printf("[CTR PS2] 16 bits: page 0x%04x clut 0x%04x | u %d-%d v %d-%d | pantalla x %d-%d y %d-%d | resubidas por perfil %u, por escritura %u\n", s_stats.p16Page,
