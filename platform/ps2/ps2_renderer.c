@@ -54,6 +54,15 @@
 // Cada cuantos triangulos se vacia la cola de gsKit para no desbordarla.
 #define PS2_TRIANGLES_PER_FLUSH 768
 
+// MODO DE PANTALLA. 1 = 240p (512x224 sin entrelazar, como la PS1): cada pixel
+// de PS1 es un pixel en la tele (letras exactas), sin parpadeo del entrelazado,
+// menos memoria del GS y menos pixeles que pintar. 0 = 480i (640x448
+// entrelazado, lo de antes: mas fino en 3D pero parpadea y las letras quedan
+// desiguales por la escala x2,07).
+#ifndef PS2_VIDEO_240P
+#define PS2_VIDEO_240P 1
+#endif
+
 // Zona de VRAM que se puede mostrar directamente (PresentVRAMRect).
 #define PS2_DISPLAY_TEX_W 512
 #define PS2_DISPLAY_TEX_H 512
@@ -345,7 +354,9 @@ internal void Ps2Renderer_VMap(int srcH, float *scale, float *offset)
 	// DESACTIVADO: en la PS2 real (imagen entrelazada en la tele) las letras y
 	// los iconos se veian PEOR con la escala entera. Se vuelve a la escala de
 	// antes (448 / 216). Poner a 1 para probar otra vez.
-	if (0 && (srcH > 0))
+	// En 240p (sin entrelazar) se usa la escala ENTERA: 216 lineas de PS1 = 216
+	// lineas en la tele, con 4 de borde arriba y abajo.
+	if ((s_gs->Interlace == GS_NONINTERLACED) && (srcH > 0))
 	{
 		const int k = screenH / srcH;
 		const int border = screenH - k * srcH;
@@ -1033,10 +1044,19 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 	// CTR NTSC-U espera 60 Hz. Con una BIOS PAL gsKit elegiria 50 Hz y el juego
 	// iria un 17% mas lento, asi que forzamos NTSC 640x448 entrelazado.
 	s_gs->Mode = GS_MODE_NTSC;
+#if PS2_VIDEO_240P
+	// 240p: 512 de ancho (igual que CTR, escala horizontal x1) y 224 lineas
+	// sin entrelazar (CTR usa 216; quedan 4 lineas negras arriba y abajo).
+	s_gs->Interlace = GS_NONINTERLACED;
+	s_gs->Field = GS_FRAME;
+	s_gs->Width = 512;
+	s_gs->Height = 224;
+#else
 	s_gs->Interlace = GS_INTERLACED;
 	s_gs->Field = GS_FIELD;
 	s_gs->Width = 640;
 	s_gs->Height = 448;
+#endif
 	// (La escala vertical exacta x2 se hace al dibujar: ver Ps2Renderer_VMap.
 	// Cambiar el modo de pantalla a 432 lineas se veia mal en la PS2 real.)
 
