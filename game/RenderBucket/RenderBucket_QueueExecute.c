@@ -1882,6 +1882,39 @@ static struct ModelFrame *RenderBucket_GetFrame(struct Instance *inst, struct Mo
 #define RenderBucket_QueueNonLevInstances RenderBucket_QueueNonLevInstances_Context
 #endif
 
+#ifdef CTR_PS2
+// PS2 (diagnostico): por que no se dibuja un kart. 0 flags, 1 sin pushbuffer,
+// 2 alfa/distancia, 3 sin LOD, 4 sin frame, 5 profundidad/fuera de vista, 6 dibujado.
+static u32 s_ps2KartWhy[2][7];
+static u32 s_ps2KartCalls = 0;
+static int RenderBucket_Ps2IsKart(struct Instance *inst)
+{
+	return (inst->thread != 0) && ((inst->thread->modelIndex == DYNAMIC_PLAYER) || (inst->thread->modelIndex == DYNAMIC_ROBOT_CAR));
+}
+static void RenderBucket_Ps2KartWhy(struct Instance *inst, int playerIndex, int why)
+{
+	if (!RenderBucket_Ps2IsKart(inst))
+	{
+		return;
+	}
+	s_ps2KartWhy[(playerIndex != 0) ? 1 : 0][why]++;
+	if (++s_ps2KartCalls >= 4000)
+	{
+		for (int p = 0; p < 2; p++)
+		{
+			const u32 *w = s_ps2KartWhy[p];
+			printf("[CTR PS2] karts vista %d: dibujados %u | flags %u | sin pushbuffer %u | alfa %u | sin LOD %u | sin frame %u | fuera de vista %u\n", p + 1, w[6], w[0], w[1],
+			       w[2], w[3], w[4], w[5]);
+		}
+		memset(s_ps2KartWhy, 0, sizeof(s_ps2KartWhy));
+		s_ps2KartCalls = 0;
+	}
+}
+#define PS2_KART_WHY(n) RenderBucket_Ps2KartWhy(inst, playerIndex, (n))
+#else
+#define PS2_KART_WHY(n)
+#endif
+
 static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, struct RenderBucketEntry *rbi, int playerIndex, u32 lodMask, int gameMode1,
                                                         struct RenderBucketQueueState *queueState)
 {
@@ -1939,6 +1972,7 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 		// NOTE(aalhendi): Retail 0x80070950-0x80070964 exits through the common
 		// epilogue and still stores the current gp flags to IDPP+0xb8.
 		idpp->instFlags = queuedFlags;
+		PS2_KART_WHY(0);
 		return rbi;
 	}
 
@@ -1946,6 +1980,7 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	{
 		// NOTE(aalhendi): Retail 0x80070964 reaches the same epilogue store.
 		idpp->instFlags = queuedFlags;
+		PS2_KART_WHY(1);
 		return rbi;
 	}
 
@@ -1963,6 +1998,7 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	if (RenderBucket_WriteAlphaScale(inst, idpp, viewDepth, queuedFlags) == 0)
 	{
 		idpp->instFlags = queuedFlags;
+		PS2_KART_WHY(2);
 		return rbi;
 	}
 
@@ -1977,6 +2013,7 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 			idpp->mh = 0;
 		}
 		idpp->instFlags = queuedFlags;
+		PS2_KART_WHY(3);
 		return rbi;
 	}
 
@@ -1995,6 +2032,7 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	if (frame == 0)
 	{
 		idpp->instFlags = queuedFlags;
+		PS2_KART_WHY(4);
 		return rbi;
 	}
 #endif
@@ -2009,8 +2047,10 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	                                 &projectionMvp) == 0)
 	{
 		idpp->instFlags = queuedFlags;
+		PS2_KART_WHY(5);
 		return rbi;
 	}
+	PS2_KART_WHY(6);
 
 	RenderBucket_SelectRetailHandlers(&queuedFlags, &split, &drawFunc, &uncompressFunc);
 	rbi->inst = inst;
