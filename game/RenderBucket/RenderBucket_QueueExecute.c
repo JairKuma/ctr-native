@@ -2670,6 +2670,43 @@ static struct TextureLayout *RenderBucket_GetCommandTexture(struct RenderBucketD
 	// NOTE(aalhendi): Retail only uses texture index zero as the explicit G3
 	// path, but a null texture-table entry also reaches DrawInstPrim_Normal as
 	// `a2 == 0` and emits G3. Do not reject that case here.
+#ifdef CTR_PS2
+	// PS2 (diagnostico): karts invisibles en pantalla partida. Se apunta la
+	// textura de cada modelo de kart (una vez por vista) y cualquier textura con
+	// paleta fuera de la VRAM (clut con y >= 512), que seria basura.
+	if (RenderBucket_Ps2IsKart(ctx->inst))
+	{
+		static const void *s_ps2TexSeen[24];
+		static int s_ps2TexSeenCount = 0;
+		static int s_ps2TexBadLogs = 0;
+		struct TextureLayout *t = ctx->idpp->ptrTexLayout[texIndex - 1];
+		int seen = 0;
+		for (int i = 0; i < s_ps2TexSeenCount; i++)
+		{
+			if (s_ps2TexSeen[i] == (const void *)ctx->idpp)
+			{
+				seen = 1;
+				break;
+			}
+		}
+		const int bad = (t != 0) && ((t->clut >> 6) >= 512);
+		if ((!seen && (s_ps2TexSeenCount < 24)) || (bad && (s_ps2TexBadLogs < 12)))
+		{
+			if (!seen && (s_ps2TexSeenCount < 24))
+			{
+				s_ps2TexSeen[s_ps2TexSeenCount++] = (const void *)ctx->idpp;
+			}
+			if (bad)
+			{
+				s_ps2TexBadLogs++;
+			}
+			printf("[CTR PS2] textura kart%s: modelo %.16s (%.16s) | inst %08x idpp %08x (+%d) | tex n.o %d de tabla %08x -> %08x | clut 0x%04x tpage 0x%04x uv %d,%d\n",
+			       bad ? " MALA" : "", ctx->inst->model->name, ctx->mh ? ctx->mh->name : "?", (u32)ctx->inst, (u32)ctx->idpp,
+			       (int)((u32)ctx->idpp - (u32)ctx->inst), texIndex, (u32)ctx->idpp->ptrTexLayout, (u32)t, t ? t->clut : 0, t ? t->tpage : 0, t ? t->u0 : 0,
+			       t ? t->v0 : 0);
+		}
+	}
+#endif
 	return ctx->idpp->ptrTexLayout[texIndex - 1];
 }
 
