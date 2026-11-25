@@ -370,10 +370,15 @@ void UI_INSTANCE_InitAll(void)
 
 	// used for multiplayer wumpa
 	sdata->ptrPushBufferUI = (int)NULL;
+#ifndef CTR_PS2
+	// PS2: en multijugador la fruta del marcador no se pinta fuera de pantalla
+	// (el renderer de PS2 no dibuja ahi): se deja ptrPushBufferUI a NULL y cada
+	// jugador tiene su fruta 3D dibujada directamente en su marcador, como en 1J.
 	if (gGT->numPlyrCurrGame >= 2)
 	{
 		sdata->ptrPushBufferUI = (int)&sdata->pushBuffer_DecalMP;
 	}
+#endif
 
 	sdata->pushBuffer_DecalMP.matrix_ViewProj = gGT->pushBuffer_UI.matrix_ViewProj;
 	sdata->pushBuffer_DecalMP.pos = gGT->pushBuffer_UI.pos;

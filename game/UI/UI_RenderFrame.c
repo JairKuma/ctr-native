@@ -1074,6 +1074,19 @@ void UI_RenderFrame_Wumpa3D_2P3P4P(struct GameTracker *gGT)
 	struct UiElement2D *hud;
 	int playerIndex;
 
+#ifdef CTR_PS2
+	// PS2: la fruta de cada jugador ya se dibuja en 3D en su marcador
+	// (UI_INSTANCE_InitAll). No hace falta la copia fuera de pantalla ni el cuadro.
+	(void)viewport2P;
+	(void)viewport3P4P;
+	(void)viewport;
+	(void)wumpaPushBuffer;
+	(void)hud;
+	(void)playerIndex;
+	(void)gGT;
+	return;
+#endif
+
 	viewport2P = GAME_WUMPA_HUD_VIEWPORTS[0];
 	viewport3P4P = GAME_WUMPA_HUD_VIEWPORTS[1];
 

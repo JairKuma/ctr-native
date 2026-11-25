@@ -108,6 +108,37 @@ void UI_ThTick_CountPickup(struct Thread *bucket)
 	{
 		inst->flags &= ~HIDE_MODEL;
 	}
+
+#ifdef CTR_PS2
+	// PS2: en multijugador cada jugador tiene su fruta 3D en el marcador (antes
+	// era un cuadro copiado de fuera de pantalla). Brillo con 10 frutas y se
+	// oculta al acabar la carrera, igual que hacia el cuadro.
+	if ((GAME_TRACKER->numPlyrCurrGame >= 2) && (inst->model->id == STATIC_FRUITDISP))
+	{
+		struct GameTracker *gGT = GAME_TRACKER;
+		for (int i = 0; i < gGT->numPlyrCurrGame; i++)
+		{
+			struct Driver *driver = gGT->drivers[i];
+			if ((driver == NULL) || (driver->instFruitDisp != inst))
+			{
+				continue;
+			}
+			if (driver->numWumpas >= DRIVER_WUMPA_JUICED_COUNT)
+			{
+				inst->alphaScale = ((s32)CTR_ReadU16LE(&sdata->wumpaShineResult) - UI_REWARD_WUMPA_SHINE_CENTER) * (1 << UI_REWARD_WUMPA_SHINE_SHIFT);
+			}
+			else
+			{
+				inst->alphaScale = 0;
+			}
+			if (((driver->actionsFlagSet & ACTION_RACE_FINISHED) != 0) || ((gGT->gameMode1 & END_OF_RACE) != 0))
+			{
+				inst->flags |= HIDE_MODEL;
+			}
+			break;
+		}
+	}
+#endif
 }
 
 void UI_ThTick_Reward(struct Thread *bucket)
