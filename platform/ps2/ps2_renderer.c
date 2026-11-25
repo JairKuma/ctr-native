@@ -255,6 +255,9 @@ struct Ps2Stats
 	u32 gsClearsSkipped;
 	u32 p16Fallback;   // texturas de 16 bits que NO se encontraron en el GS
 	int p16LastX, p16LastY;
+	int p16MinU, p16MaxU, p16MinV, p16MaxV; // texeles usados (primer vertice)
+	int p16MinX, p16MaxX, p16MinY, p16MaxY; // posicion en pantalla (primer vertice)
+	int p16Clut, p16Page;
 };
 
 global_variable struct Ps2Stats s_stats;
@@ -844,6 +847,23 @@ internal int Ps2Tex_BindSlow(const GrVertex *v, GSTEXTURE *tex, u8 profile)
 			return 1;
 		}
 
+		if (s_stats.p16Fallback == 0)
+		{
+			s_stats.p16MinU = s_stats.p16MaxU = v->u;
+			s_stats.p16MinV = s_stats.p16MaxV = v->v;
+			s_stats.p16MinX = s_stats.p16MaxX = v->x;
+			s_stats.p16MinY = s_stats.p16MaxY = v->y;
+		}
+		if (v->u < s_stats.p16MinU) s_stats.p16MinU = v->u;
+		if (v->u > s_stats.p16MaxU) s_stats.p16MaxU = v->u;
+		if (v->v < s_stats.p16MinV) s_stats.p16MinV = v->v;
+		if (v->v > s_stats.p16MaxV) s_stats.p16MaxV = v->v;
+		if (v->x < s_stats.p16MinX) s_stats.p16MinX = v->x;
+		if (v->x > s_stats.p16MaxX) s_stats.p16MaxX = v->x;
+		if (v->y < s_stats.p16MinY) s_stats.p16MinY = v->y;
+		if (v->y > s_stats.p16MaxY) s_stats.p16MaxY = v->y;
+		s_stats.p16Clut = (u16)v->clut;
+		s_stats.p16Page = (u16)v->page;
 		s_stats.p16Fallback++;
 		s_stats.p16LastX = Ps2Tex_PageX(v->page);
 		s_stats.p16LastY = Ps2Tex_PageY(v->page);
@@ -1082,6 +1102,11 @@ internal void Ps2Renderer_UpdateStats(void)
 		}
 	}
 	printf(" | ultima copia %u,%u %ux%u | pasadas saltadas %u\n", s_fbLastSnapX, s_fbLastSnapY, s_fbLastSnapW, s_fbLastSnapH, s_stats.surfacePass2Skips);
+	if (s_stats.p16Fallback > 0)
+	{
+		printf("[CTR PS2] 16 bits: page 0x%04x clut 0x%04x | u %d-%d v %d-%d | pantalla x %d-%d y %d-%d\n", s_stats.p16Page, s_stats.p16Clut, s_stats.p16MinU,
+		       s_stats.p16MaxU, s_stats.p16MinV, s_stats.p16MaxV, s_stats.p16MinX, s_stats.p16MaxX, s_stats.p16MinY, s_stats.p16MaxY);
+	}
 
 	memset(&s_stats, 0, sizeof(s_stats));
 	s_fbSnapshots = 0;
