@@ -38,7 +38,31 @@ void MainDB_PrimMem(struct PrimMem *primMem, u32 sizeInput)
 	u8 *allocation;
 	u8 *end;
 
+#ifdef CTR_PS2
+	// PS2: la memoria de primitivas (lo que se dibuja en cada fotograma) era la
+	// de la PS1. En pantalla partida se llenaba y los karts, que se dibujan de
+	// los ultimos, desaparecian (solo quedaba su humo y su sombra). En la PS2
+	// sobra RAM: dos bloques propios del doble de tamano, fuera del MEMPACK.
+	{
+#define PS2_PRIMMEM_BYTES (320 * 1024)
+		static u8 s_ps2PrimMem[2][PS2_PRIMMEM_BYTES] __attribute__((aligned(64)));
+		static int s_ps2PrimMemNext = 0;
+		u32 bigSize = size * 2;
+		if (bigSize > PS2_PRIMMEM_BYTES)
+		{
+			bigSize = PS2_PRIMMEM_BYTES;
+		}
+		if (bigSize < size)
+		{
+			bigSize = size;
+		}
+		allocation = s_ps2PrimMem[s_ps2PrimMemNext];
+		s_ps2PrimMemNext ^= 1;
+		size = bigSize;
+	}
+#else
 	allocation = MEMPACK_AllocMem(size, sdata_static.s_PrimMem);
+#endif
 	primMem->capacityBytes = size;
 	// Capacity keeps the request; the usable end is rounded down to a word.
 	size = (size >> 2) << 2;
