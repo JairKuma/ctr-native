@@ -42,7 +42,13 @@ static s32 RenderBucket_DrawInstPrim_NormalAtOTEntry(struct RenderBucketDrawCont
 	// NOTE(aalhendi): Keep the conservative GT3 capacity check even for G3,
 	// before NULL-OT handling or any GTE side effect.
 	if (normalCursor + sizeof(POLY_GT3) >= (u8 *)primMem->guardEnd)
+	{
+#ifdef CTR_PS2
+		extern u32 g_ps2PrimMemFull;
+		g_ps2PrimMemFull++;
+#endif
 		return -1;
+	}
 	if (otEntry == 0)
 		return 0;
 #else

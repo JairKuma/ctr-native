@@ -1886,6 +1886,7 @@ static struct ModelFrame *RenderBucket_GetFrame(struct Instance *inst, struct Mo
 // PS2 (diagnostico): por que no se dibuja un kart. 0 flags, 1 sin pushbuffer,
 // 2 alfa/distancia, 3 sin LOD, 4 sin frame, 5 profundidad/fuera de vista, 6 dibujado.
 static u32 s_ps2KartWhy[2][7];
+u32 g_ps2PrimMemFull = 0; // poligonos de modelos descartados por memoria de primitivas llena
 static u32 s_ps2KartCalls = 0;
 static int RenderBucket_Ps2IsKart(struct Instance *inst)
 {
@@ -1906,6 +1907,8 @@ static void RenderBucket_Ps2KartWhy(struct Instance *inst, int playerIndex, int 
 			printf("[CTR PS2] karts vista %d: dibujados %u | flags %u | sin pushbuffer %u | alfa %u | sin LOD %u | sin frame %u | fuera de vista %u\n", p + 1, w[6], w[0], w[1],
 			       w[2], w[3], w[4], w[5]);
 		}
+		printf("[CTR PS2] memoria de primitivas llena: %u poligonos descartados\n", g_ps2PrimMemFull);
+		g_ps2PrimMemFull = 0;
 		memset(s_ps2KartWhy, 0, sizeof(s_ps2KartWhy));
 		s_ps2KartCalls = 0;
 	}
