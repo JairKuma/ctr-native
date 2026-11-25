@@ -2062,6 +2062,36 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	idpp->unkEC = drawFunc;
 	idpp->unkF0 = uncompressFunc;
 	RenderBucket_WriteInstanceCallbackLabels(inst, queuedFlags);
+#ifdef CTR_PS2
+	// PS2 (diagnostico): datos de cada LOD de kart que se dibuja (una vez cada uno).
+	if (RenderBucket_Ps2IsKart(inst))
+	{
+		static const struct ModelHeader *s_ps2HdrSeen[24];
+		static int s_ps2HdrSeenCount = 0;
+		int seen = 0;
+		for (int i = 0; i < s_ps2HdrSeenCount; i++)
+		{
+			if (s_ps2HdrSeen[i] == mh)
+			{
+				seen = 1;
+				break;
+			}
+		}
+		if (!seen && (s_ps2HdrSeenCount < 24))
+		{
+			const u32 *cmd = (const u32 *)mh->ptrCommandList;
+			s_ps2HdrSeen[s_ps2HdrSeenCount++] = mh;
+			printf("[CTR PS2] LOD kart %.16s (n.o %d de %d): flags 0x%04x | anims %u (%08x) | frame %08x | unk1 %08x unk3 %08x | animtex %08x | prim 0x%x | draw %d unc %d | cmds",
+			       mh->name, lodIndex, inst->model->numHeaders, mh->flags, mh->numAnimations, (u32)mh->ptrAnimations, (u32)mh->ptrFrameData, (u32)mh->unk1,
+			       (u32)mh->unk3, (u32)mh->animtex, (u32)inst->funcPtr[1], drawFunc, uncompressFunc);
+			for (int i = 0; (cmd != 0) && (i < 8); i++)
+			{
+				printf(" %08x", cmd[i]);
+			}
+			printf("\n");
+		}
+	}
+#endif
 	idpp->ptrCommandList = mh->ptrCommandList;
 	idpp->ptrTexLayout = mh->ptrTexLayout;
 	idpp->ptrColorLayout = (u32)mh->ptrColors;
