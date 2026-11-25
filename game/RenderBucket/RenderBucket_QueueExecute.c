@@ -1108,6 +1108,16 @@ static struct ModelHeader *RenderBucket_SelectModelHeader(struct Instance *inst,
 	{
 		if (RenderBucket_MipsSub(projectedDistance, (u16)mh->maxDistanceLOD) < 0)
 		{
+#ifdef CTR_PS2
+			// PS2 (prueba): en pantalla partida los LOD _low y _box de los karts
+			// salen invisibles. Se usa siempre el primero (_med) para los karts.
+			if ((lodIndex > 0) && (inst->thread != 0) &&
+			    ((inst->thread->modelIndex == DYNAMIC_PLAYER) || (inst->thread->modelIndex == DYNAMIC_ROBOT_CAR)))
+			{
+				*lodIndexOut = 0;
+				return inst->model->headers;
+			}
+#endif
 			*lodIndexOut = lodIndex;
 			return mh;
 		}
