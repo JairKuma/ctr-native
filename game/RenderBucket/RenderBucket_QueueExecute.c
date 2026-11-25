@@ -1121,37 +1121,6 @@ static struct ModelHeader *RenderBucket_SelectModelHeader(struct Instance *inst,
 		}
 	}
 
-#ifdef CTR_PS2
-	// PS2 (diagnostico): en pantalla partida los karts lejanos desaparecen (solo
-	// se ve el humo). Se apuntan una vez los LOD de cada modelo de kart para ver
-	// que distancias trae y cuanto vale la distancia calculada.
-	if ((inst->thread != 0) && ((inst->thread->modelIndex == DYNAMIC_PLAYER) || (inst->thread->modelIndex == DYNAMIC_ROBOT_CAR)))
-	{
-		static struct Model *s_ps2LoggedModels[16];
-		static int s_ps2LoggedCount = 0;
-		int known = 0;
-		for (int i = 0; i < s_ps2LoggedCount; i++)
-		{
-			if (s_ps2LoggedModels[i] == inst->model)
-			{
-				known = 1;
-				break;
-			}
-		}
-		if (!known && (s_ps2LoggedCount < 16))
-		{
-			s_ps2LoggedModels[s_ps2LoggedCount++] = inst->model;
-			printf("[CTR PS2] kart sin LOD: modelo %.16s | id %d | LODs %d | distancia %d (ancho %d, H %d, prof %d) | limites:", inst->model->name, inst->model->id,
-			       inst->model->numHeaders, projectedDistance, pb->rect.w, pb->distanceToScreen_PREV, viewDepth);
-			for (int i = 0; i < inst->model->numHeaders; i++)
-			{
-				printf(" %.16s=%d", inst->model->headers[i].name, (int)(u16)inst->model->headers[i].maxDistanceLOD);
-			}
-			printf("\n");
-		}
-	}
-#endif
-
 	*lodExhaustedOut = 1;
 	return 0;
 }
@@ -1882,42 +1851,6 @@ static struct ModelFrame *RenderBucket_GetFrame(struct Instance *inst, struct Mo
 #define RenderBucket_QueueNonLevInstances RenderBucket_QueueNonLevInstances_Context
 #endif
 
-#ifdef CTR_PS2
-// PS2 (diagnostico): por que no se dibuja un kart. 0 flags, 1 sin pushbuffer,
-// 2 alfa/distancia, 3 sin LOD, 4 sin frame, 5 profundidad/fuera de vista, 6 dibujado.
-static u32 s_ps2KartWhy[2][7];
-u32 g_ps2PrimMemFull = 0; // poligonos de modelos descartados por memoria de primitivas llena
-static u32 s_ps2KartCalls = 0;
-static int RenderBucket_Ps2IsKart(struct Instance *inst)
-{
-	return (inst->thread != 0) && ((inst->thread->modelIndex == DYNAMIC_PLAYER) || (inst->thread->modelIndex == DYNAMIC_ROBOT_CAR));
-}
-static void RenderBucket_Ps2KartWhy(struct Instance *inst, int playerIndex, int why)
-{
-	if (!RenderBucket_Ps2IsKart(inst))
-	{
-		return;
-	}
-	s_ps2KartWhy[(playerIndex != 0) ? 1 : 0][why]++;
-	if (++s_ps2KartCalls >= 4000)
-	{
-		for (int p = 0; p < 2; p++)
-		{
-			const u32 *w = s_ps2KartWhy[p];
-			printf("[CTR PS2] karts vista %d: dibujados %u | flags %u | sin pushbuffer %u | alfa %u | sin LOD %u | sin frame %u | fuera de vista %u\n", p + 1, w[6], w[0], w[1],
-			       w[2], w[3], w[4], w[5]);
-		}
-		printf("[CTR PS2] memoria de primitivas llena: %u poligonos descartados\n", g_ps2PrimMemFull);
-		g_ps2PrimMemFull = 0;
-		memset(s_ps2KartWhy, 0, sizeof(s_ps2KartWhy));
-		s_ps2KartCalls = 0;
-	}
-}
-#define PS2_KART_WHY(n) RenderBucket_Ps2KartWhy(inst, playerIndex, (n))
-#else
-#define PS2_KART_WHY(n)
-#endif
-
 static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, struct RenderBucketEntry *rbi, int playerIndex, u32 lodMask, int gameMode1,
                                                         struct RenderBucketQueueState *queueState)
 {
@@ -1975,7 +1908,6 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 		// NOTE(aalhendi): Retail 0x80070950-0x80070964 exits through the common
 		// epilogue and still stores the current gp flags to IDPP+0xb8.
 		idpp->instFlags = queuedFlags;
-		PS2_KART_WHY(0);
 		return rbi;
 	}
 
@@ -1983,7 +1915,6 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	{
 		// NOTE(aalhendi): Retail 0x80070964 reaches the same epilogue store.
 		idpp->instFlags = queuedFlags;
-		PS2_KART_WHY(1);
 		return rbi;
 	}
 
@@ -2001,7 +1932,6 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	if (RenderBucket_WriteAlphaScale(inst, idpp, viewDepth, queuedFlags) == 0)
 	{
 		idpp->instFlags = queuedFlags;
-		PS2_KART_WHY(2);
 		return rbi;
 	}
 
@@ -2016,7 +1946,6 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 			idpp->mh = 0;
 		}
 		idpp->instFlags = queuedFlags;
-		PS2_KART_WHY(3);
 		return rbi;
 	}
 
@@ -2035,7 +1964,6 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	if (frame == 0)
 	{
 		idpp->instFlags = queuedFlags;
-		PS2_KART_WHY(4);
 		return rbi;
 	}
 #endif
@@ -2050,10 +1978,8 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	                                 &projectionMvp) == 0)
 	{
 		idpp->instFlags = queuedFlags;
-		PS2_KART_WHY(5);
 		return rbi;
 	}
-	PS2_KART_WHY(6);
 
 	RenderBucket_SelectRetailHandlers(&queuedFlags, &split, &drawFunc, &uncompressFunc);
 	rbi->inst = inst;
@@ -2062,36 +1988,6 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	idpp->unkEC = drawFunc;
 	idpp->unkF0 = uncompressFunc;
 	RenderBucket_WriteInstanceCallbackLabels(inst, queuedFlags);
-#ifdef CTR_PS2
-	// PS2 (diagnostico): datos de cada LOD de kart que se dibuja (una vez cada uno).
-	if (RenderBucket_Ps2IsKart(inst))
-	{
-		static const struct ModelHeader *s_ps2HdrSeen[24];
-		static int s_ps2HdrSeenCount = 0;
-		int seen = 0;
-		for (int i = 0; i < s_ps2HdrSeenCount; i++)
-		{
-			if (s_ps2HdrSeen[i] == mh)
-			{
-				seen = 1;
-				break;
-			}
-		}
-		if (!seen && (s_ps2HdrSeenCount < 24))
-		{
-			const u32 *cmd = (const u32 *)mh->ptrCommandList;
-			s_ps2HdrSeen[s_ps2HdrSeenCount++] = mh;
-			printf("[CTR PS2] LOD kart %.16s (n.o %d de %d): flags 0x%04x | anims %u (%08x) | frame %08x | unk1 %08x unk3 %08x | animtex %08x | prim 0x%x | draw %d unc %d | cmds",
-			       mh->name, lodIndex, inst->model->numHeaders, mh->flags, mh->numAnimations, (u32)mh->ptrAnimations, (u32)mh->ptrFrameData, (u32)mh->unk1,
-			       (u32)mh->unk3, (u32)mh->animtex, (u32)inst->funcPtr[1], drawFunc, uncompressFunc);
-			for (int i = 0; (cmd != 0) && (i < 8); i++)
-			{
-				printf(" %08x", cmd[i]);
-			}
-			printf("\n");
-		}
-	}
-#endif
 	idpp->ptrCommandList = mh->ptrCommandList;
 	idpp->ptrTexLayout = mh->ptrTexLayout;
 	idpp->ptrColorLayout = (u32)mh->ptrColors;
@@ -2700,43 +2596,6 @@ static struct TextureLayout *RenderBucket_GetCommandTexture(struct RenderBucketD
 	// NOTE(aalhendi): Retail only uses texture index zero as the explicit G3
 	// path, but a null texture-table entry also reaches DrawInstPrim_Normal as
 	// `a2 == 0` and emits G3. Do not reject that case here.
-#ifdef CTR_PS2
-	// PS2 (diagnostico): karts invisibles en pantalla partida. Se apunta la
-	// textura de cada modelo de kart (una vez por vista) y cualquier textura con
-	// paleta fuera de la VRAM (clut con y >= 512), que seria basura.
-	if (RenderBucket_Ps2IsKart(ctx->inst))
-	{
-		static const void *s_ps2TexSeen[24];
-		static int s_ps2TexSeenCount = 0;
-		static int s_ps2TexBadLogs = 0;
-		struct TextureLayout *t = ctx->idpp->ptrTexLayout[texIndex - 1];
-		int seen = 0;
-		for (int i = 0; i < s_ps2TexSeenCount; i++)
-		{
-			if (s_ps2TexSeen[i] == (const void *)ctx->idpp)
-			{
-				seen = 1;
-				break;
-			}
-		}
-		const int bad = (t != 0) && ((t->clut >> 6) >= 512);
-		if ((!seen && (s_ps2TexSeenCount < 24)) || (bad && (s_ps2TexBadLogs < 12)))
-		{
-			if (!seen && (s_ps2TexSeenCount < 24))
-			{
-				s_ps2TexSeen[s_ps2TexSeenCount++] = (const void *)ctx->idpp;
-			}
-			if (bad)
-			{
-				s_ps2TexBadLogs++;
-			}
-			printf("[CTR PS2] textura kart%s: modelo %.16s (%.16s) | inst %08x idpp %08x (+%d) | tex n.o %d de tabla %08x -> %08x | clut 0x%04x tpage 0x%04x uv %d,%d\n",
-			       bad ? " MALA" : "", ctx->inst->model->name, ctx->mh ? ctx->mh->name : "?", (u32)ctx->inst, (u32)ctx->idpp,
-			       (int)((u32)ctx->idpp - (u32)ctx->inst), texIndex, (u32)ctx->idpp->ptrTexLayout, (u32)t, t ? t->clut : 0, t ? t->tpage : 0, t ? t->u0 : 0,
-			       t ? t->v0 : 0);
-		}
-	}
-#endif
 	return ctx->idpp->ptrTexLayout[texIndex - 1];
 }
 
