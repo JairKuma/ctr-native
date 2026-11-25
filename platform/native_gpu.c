@@ -1197,7 +1197,7 @@ internal void NativeGpu_Ps2DumpOddPrim(const char *kind, const void *prim, int t
 	{
 		group = ((tpage & 0x1f) == 0x1f) ? 0 : 1;
 	}
-	else if (((tpage & 0x1f) == 0x0e) || ((tpage & 0x1f) == 0x0f))
+	else if ((kind[1] == 'T') && (kind[2] == '3') && (((tpage & 0x1f) == 0x0e) || ((tpage & 0x1f) == 0x0f)))
 	{
 		group = 2;
 	}
